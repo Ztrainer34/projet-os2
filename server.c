@@ -11,37 +11,24 @@
 #include <arpa/inet.h>
 #include <stdbool.h>
 #include <stdint.h>
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <pthread.h>
-
-
-=======
 #include <pthread.h>
 
 #include "../checked.h"
 
-static volatile sig_atomic_t sigintRecu = 0;
-static volatile sig_atomic_t triggerCleanup = 0;
+static volatile sig_atomic_t sigint_recu = 0;
+static volatile sig_atomic_t trigger_cleanup = 0;
 
-static void GestionnaireSigint([[ maybe_unused ]] int sigint) {
-   sigintRecu = 1;  // doit tout clean et fermer le programme
+static void sigint_handler([[ maybe_unused ]] int sigint) {
+   sigint_recu = 1;  // doit tout clean et fermer le programme
 }
 
-static void GestionnaireSigpipe([[ maybe_unused ]] int sigpipe) {
+static void sigpipe_handler([[ maybe_unused ]] int sigpipe) {
     const char *message = "Déconnexion de l'interlocuteur détectée ou Pipe cassé \n";
     ssize_t bytesWr =  write(STDOUT_FILENO, message, sizeof(message) - 1);
     (void)bytesWr;
-    triggerCleanup = 1;
+    trigger_cleanup = 1;
     
 }
-
 
 void *handle_client(void *client_sock) {
     int sock = *(int *)client_sock;
@@ -83,10 +70,12 @@ void sock_creation(){
     size_t addrlen = sizeof ( address );
     // Ouvre une nouvelle connexion
 
-
     while (1) {
+      if (sigint_recu){
+         printf("Signal SIGINT reçu, fermeture du programme \n");
+         exit(EXIT_SUCCESS);
+      }
         int new_socket = checked(accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen));
-
         if (new_socket >= 0) {
             int *client_sock = (int*)malloc(sizeof(int));
             *client_sock = new_socket;
@@ -101,7 +90,14 @@ void sock_creation(){
 }
 
 int main(void) {
+    struct sigaction sa;    //sigaction car sinn fgets bloquant
+    sa.sa_handler = sigint_handler;
+    sa.sa_flags = 0; // Pas de drapeau spécial
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("Erreur lors de l'initialisation du gestionnaire SIGINT");
+        exit(EXIT_FAILURE);
+    }
     sock_creation();
     return 0;
-
 }
