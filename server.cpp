@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <pthread.h>
 
 #include "../checked.h"
 
@@ -27,6 +28,20 @@ static void GestionnaireSigpipe([[ maybe_unused ]] int sigpipe) {
     (void)bytesWr;
     triggerCleanup = 1;
     
+}
+
+void *handle_client(void *client_sock) {
+    int sock = *(int *)client_sock;
+    free(client_sock);
+
+    char buffer[1024];
+    int bytes_read = read(sock, buffer, sizeof(buffer));
+    if (bytes_read > 0) {
+        printf("Client says: %s\n", buffer);
+        send(sock, "Message received!", strlen("Message received!"), 0);
+    }
+    close(sock);
+    return NULL;
 }
 
 void sock_creation(){
@@ -54,12 +69,20 @@ void sock_creation(){
     checked(listen (server_fd , 5)); // maximum 3 connexions en attente
     size_t addrlen = sizeof ( address );
     // Ouvre une nouvelle connexion
-    int new_socket = checked(accept(server_fd , ( struct sockaddr *)& address , ( socklen_t *)& addrlen ));
-    char buffer [1024];
-    // Reçoit un message
-    checked(read(new_socket , buffer , 1024));
+
+    while (1) {
+        int new_socket = checked(accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen));
+        if (new_socket >= 0) {
+            int *client_sock = (int*)malloc(sizeof(int));
+            *client_sock = new_socket;
+            pthread_t tid;
+            pthread_create(&tid, NULL, handle_client, client_sock);
+            pthread_detach(tid); // Automatically free thread resources
+        }
+    } 
    close(server_fd);
-   close(new_socket);
+   
+   
 }
 
 int main(void) {
