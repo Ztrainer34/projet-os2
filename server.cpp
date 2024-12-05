@@ -11,6 +11,18 @@
 #include <arpa/inet.h>
 #include <stdbool.h>
 #include <stdint.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+
+
+=======
 #include <pthread.h>
 
 #include "../checked.h"
@@ -29,6 +41,7 @@ static void GestionnaireSigpipe([[ maybe_unused ]] int sigpipe) {
     triggerCleanup = 1;
     
 }
+
 
 void *handle_client(void *client_sock) {
     int sock = *(int *)client_sock;
@@ -70,8 +83,10 @@ void sock_creation(){
     size_t addrlen = sizeof ( address );
     // Ouvre une nouvelle connexion
 
+
     while (1) {
         int new_socket = checked(accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen));
+
         if (new_socket >= 0) {
             int *client_sock = (int*)malloc(sizeof(int));
             *client_sock = new_socket;
@@ -88,4 +103,5 @@ void sock_creation(){
 int main(void) {
     sock_creation();
     return 0;
+
 }
