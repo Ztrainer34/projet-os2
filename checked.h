@@ -1,5 +1,5 @@
-#ifndef __COMMON_H
-#define __COMMON_H
+#ifndef __CHECKED_H
+#define __CHECKED_H
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,4 +15,10 @@ int _checked(int ret, char* calling_function) {
 
 // The macro allows us to retrieve the name of the calling function
 #define checked(call) _checked(call, #call)
-#endif  // __COMMON_H
+
+#define checked_wr(call) _checked(((call) - 1), #call)
+
+// Macro for read-like calls
+#define checked_rd(call) _checked((call), #call)
+
+#endif  // __CHECKED_H
