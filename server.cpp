@@ -13,7 +13,7 @@
 #include <stdint.h>
 #include <pthread.h>
 
-#include "../checked.h"
+#include "../ .h"
 
 static volatile sig_atomic_t sigintRecu = 0;
 static volatile sig_atomic_t triggerCleanup = 0;
@@ -53,7 +53,7 @@ void sock_creation(){
             port = 1234; // Reset to default if out of range
         }
     }
-    int server_fd = checked(socket (AF_INET , SOCK_STREAM , 0)); // Créer le socket
+    int server_fd =  (socket (AF_INET , SOCK_STREAM , 0)); // Créer le socket
     
     int opt = 1;
     // Permet la réutilisation du port/de l'adresse
@@ -63,15 +63,15 @@ void sock_creation(){
     address . sin_addr .s_addr = INADDR_ANY ;
     address . sin_port = htons (port);
     // Définit l'adresse et le port d'écoute , réserve le port
-    checked(bind(server_fd , ( struct sockaddr *)& address , sizeof ( address )));
+     (bind(server_fd , ( struct sockaddr *)& address , sizeof ( address )));
 
     // Commence l'écoute
-    checked(listen (server_fd , 5)); // maximum 3 connexions en attente
+     (listen (server_fd , 5)); // maximum 3 connexions en attente
     size_t addrlen = sizeof ( address );
     // Ouvre une nouvelle connexion
 
     while (1) {
-        int new_socket = checked(accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen));
+        int new_socket =  (accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen));
         if (new_socket >= 0) {
             int *client_sock = (int*)malloc(sizeof(int));
             *client_sock = new_socket;
