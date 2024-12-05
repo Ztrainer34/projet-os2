@@ -7,6 +7,30 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+
+
+
+void *handle_client(void *client_sock) {
+    int sock = *(int *)client_sock;
+    free(client_sock);
+
+    char buffer[1024];
+    int bytes_read = read(sock, buffer, sizeof(buffer));
+    if (bytes_read > 0) {
+        printf("Client says: %s\n", buffer);
+        send(sock, "Message received!", strlen("Message received!"), 0);
+    }
+    close(sock);
+    return NULL;
+}
+
+
 
 void sock_creation(){
     const char *port_str = getenv("PORT_SERVEUR");
@@ -32,11 +56,17 @@ void sock_creation(){
     listen (server_fd , 5); // maximum 3 connexions en attente
     size_t addrlen = sizeof ( address );
     // Ouvre une nouvelle connexion
-    int new_socket = accept(server_fd , ( struct sockaddr *)& address , ( socklen_t *)& addrlen );
-    char buffer [1024];
-    // Reçoit un message
-    read(new_socket , buffer , 1024);}
-
+    while (1) {
+        int new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
+        if (new_socket >= 0) {
+            int *client_sock = (int*)malloc(sizeof(int));
+            *client_sock = new_socket;
+            pthread_t tid;
+            pthread_create(&tid, NULL, handle_client, client_sock);
+            pthread_detach(tid); // Automatically free thread resources
+        }
+    }
+}
 int main(void) {
     sock_creation();
 }
