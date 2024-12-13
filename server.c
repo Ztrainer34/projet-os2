@@ -97,17 +97,43 @@ void *handle_client(void *client_sock) {
         if (bytes_read > 0) {
             buffer[bytes_read] = '\0'; // Assure la terminaison de la chaîne
             add_username(buffer); // Ajoute un username dans la liste
+            char *recipient = strtok(buffer, " ");
+            char *message = strtok(NULL, "");
 
 
 
+            if (recipient && message) {
+                pthread_mutex_lock(&clients_mutex);
 
-            pthread_mutex_lock(&clients_mutex);
-            printf("%s\n", buffer);
-            for (int i = 0; i < liste_client.client_count; i++) {
-                if (liste_client.client_sockets[i] != sock) {
-                    send(liste_client.client_sockets[i], buffer, strlen(buffer), 0);
+                // Find the recipient in the list
+                int recipient_sock = -1;
+
+                for (int i = 0; i < liste_client.client_count; i++) {
+                    if (liste_client.client_usernames[i] != NULL &&
+                        strcmp(liste_client.client_usernames[i], recipient) == 0) {
+                        recipient_sock = liste_client.client_sockets[i];
+                        printf("%i\n",recipient_sock);
+                        break;
+                        }
+                }
+
+                if (recipient_sock != -1) {
+                    // Debug: print recipient and message
+                    printf("Sending message to recipient socket %d: %s\n", recipient_sock, message);
+                    ssize_t sent_bytes = send(recipient_sock, message, strlen(message), 0);
+                    if (sent_bytes == -1) {
+                        perror("Error sending message to recipient");
+                    } else {
+                        printf("Message sent successfully (%ld bytes)\n", sent_bytes);
+                    }
+                }
+                else {
+                    // Notify sender that the recipient was not found
+                    const char *err_msg = "Recipient not found\n";
+                    send(sock, err_msg, strlen(err_msg), 0);
                 }
             }
+
             pthread_mutex_unlock(&clients_mutex);
         } else if (bytes_read == 0) { // Le client a fermé la connexion
             printf("Client disconnected: socket %d\n", sock);
