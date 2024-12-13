@@ -29,7 +29,7 @@ struct ListeClient {
     char* client_usernames[MAX_CLIENTS];  // Tableau des usernames des clients
 };
 
-struct ListeClient liste_client; 
+struct ListeClient liste_client;
 
 // Fonction pour afficher les usernames des clients connectés
 void printClientUsernames() {
@@ -98,11 +98,11 @@ void *handle_client(void *client_sock) {
             buffer[bytes_read] = '\0'; // Assure la terminaison de la chaîne
             add_username(buffer); // Ajoute un username dans la liste
 
-            printf("%s\n", buffer);
-            send(sock, "Message received!", strlen("Message received!"), 0);
+
+
 
             pthread_mutex_lock(&clients_mutex);
-            
+            printf("%s\n", buffer);
             for (int i = 0; i < liste_client.client_count; i++) {
                 if (liste_client.client_sockets[i] != sock) {
                     send(liste_client.client_sockets[i], buffer, strlen(buffer), 0);
@@ -116,6 +116,7 @@ void *handle_client(void *client_sock) {
             for (int i = 0; i < liste_client.client_count; i++) {
                 if (liste_client.client_sockets[i] == sock) {
                     liste_client.client_sockets[i] = liste_client.client_sockets[--liste_client.client_count];
+
                     free(liste_client.client_usernames[i]); // Libère la mémoire allouée pour le username
                     break;
                 }
