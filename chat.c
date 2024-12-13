@@ -180,56 +180,31 @@ void send_messages(int socket_fd, const char* username, int isbot,int ismanual,c
 }
 
 
-void* receive_messages(void* args){
-   char received_message[1055];
+void* receive_messages(void* args) {
+    char received_message[1055];
 
-   ThreadArgs* thread_args = (ThreadArgs* ) args;
-   int socket_fd = thread_args->socket_fd;
-   char* shared_memory = thread_args->the_shared_memory;
-   int is_bot = thread_args->is_bot_flag;
+    ThreadArgs* thread_args = (ThreadArgs*)args;
+    int socket_fd = thread_args->socket_fd;
 
-   while(1){
-      ssize_t n = read(socket_fd, received_message, sizeof(received_message));
-      char* sender = strtok(received_message, " "); // split the sender's username with the message
-      char* message = strtok(NULL, "");  // the rest of the message
-      if (n == 0){
-         perror("Entrée standard fermée");
-         close(socket_fd);
-         exit(0);
-      }
-      else if (n < 0){
-         perror("read");
-         close(socket_fd);
-         exit(EXIT_FAILURE);
-      }
-
-      else if (n > 0){
-         //separate sender from message
-
-         if(is_bot && is_manual){ // mode  bot and manual
-            printf("\a");
-            printf("%s\n",received_message);
+    while (1) {
+        ssize_t n = read(socket_fd, received_message, sizeof(received_message) - 1);
+        if (n > 0) {
+            received_message[n] = '\0'; // Null-terminate the string
+            printf("[Received] %s\n", received_message);
             fflush(stdout);
+        } else if (n == 0) {
+            printf("Server closed connection.\n");
+            break;
+        } else {
+            perror("Error reading from socket");
+            break;
+        }
+    }
 
-         }
-
-         else if(is_bot && !is_manual){ // mode bot only
-               printf("%s\n",received_message);
-               fflush(stdout);
-         }
-
-         else if(is_manual && !is_bot){ // mode manual only
-               printf("\a");
-               fflush(stdout);
-               store_in_memory(shared_memory,received_message, sender);
-         }
-
-      }
-
-   }
-   close(socket_fd);
-   return NULL;
+    close(socket_fd);
+    return NULL;
 }
+
 
 
 
