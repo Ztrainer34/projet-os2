@@ -107,11 +107,12 @@ void *handle_client(void *client_sock) {
 
                 // Find the recipient in the list
                 int recipient_sock = -1;
-
+                char *name ;
                 for (int i = 0; i < liste_client.client_count; i++) {
-                    if (liste_client.client_usernames[i] != NULL &&
-                        strcmp(liste_client.client_usernames[i], recipient) == 0) {
+                    if (liste_client.client_usernames[i+1] != NULL &&
+                        strcmp(liste_client.client_usernames[i+1], recipient) == 0) {
                         recipient_sock = liste_client.client_sockets[i];
+                        name = liste_client.client_usernames[i+1];
                         printf("%i\n",recipient_sock);
                         break;
                         }
@@ -119,7 +120,7 @@ void *handle_client(void *client_sock) {
 
                 if (recipient_sock != -1) {
                     // Debug: print recipient and message
-                    printf("Sending message to recipient socket %d: %s\n", recipient_sock, message);
+                    printf("Sending message to recipient socket %d: %s\n", recipient_sock, name);
                     ssize_t sent_bytes = send(recipient_sock, message, strlen(message), 0);
                     if (sent_bytes == -1) {
                         perror("Error sending message to recipient");
