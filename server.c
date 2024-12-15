@@ -167,7 +167,7 @@ void *handle_client(void *client_sock) {
             fflush(stdout);
             pthread_mutex_lock(&clients_mutex);
             if (recipient && message) {
-                pthread_mutex_lock(&clients_mutex);
+    
 
                 // Find the recipient in the list
                 int recipient_sock = -1;
@@ -298,6 +298,7 @@ void sock_creation(){
 }
 
 int main(void) {
+    liste_client.client_count = 0; 
     signal(SIGINT, GestionnaireSigint);
     signal(SIGPIPE, SIG_IGN);
     sock_creation();
