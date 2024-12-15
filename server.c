@@ -24,7 +24,7 @@
 
 #include "../checked.h"
 #define MAX_CLIENTS 1000
-static volatile sig_atomic_t sigintRecu = 0;
+static volatile sig_atomic_t sigint_recu = 0;
 static volatile sig_atomic_t triggerCleanup = 0;
 
 
@@ -46,15 +46,27 @@ void printClientUsernames() {
 }
 
 static void GestionnaireSigint([[ maybe_unused ]] int sigint) {
-   sigintRecu = 1;  // doit tout clean et fermer le programme
+   sigint_recu = 1;  // doit tout clean et fermer le programme
 }
-static void GestionnaireSigpipe([[ maybe_unused ]] int sigpipe) {
-    const char *message = "Déconnexion de l'interlocuteur détectée ou Pipe cassé \n";
-    ssize_t bytesWr =  write(STDOUT_FILENO, message, sizeof(message) - 1);
-    (void)bytesWr;
-    triggerCleanup = 1;
 
-}
+void shutdown_server(int server_fd){
+    printf(" serveur se ferme \n ");
+    pthread_mutex_lock(&clients_mutex);
+    const char* server_shutdown = " Déconnexion du serveur. \n";
+    for (int i = 0; i < liste_client.client_count; i++) {
+        send(liste_client.client_sockets[i], server_shutdown, strlen(server_shutdown), 0); 
+        // envoie un msg a chaque client que le serveur se déconnecte
+        if(liste_client.client_usernames[i]){
+            free(liste_client.client_usernames[i]);
+        }
+        close(liste_client.client_sockets[i]);
+    }
+    close(server_fd);
+    liste_client.client_count = 0;
+    pthread_mutex_unlock(&clients_mutex);
+
+    pthread_mutex_destroy(&clients_mutex); // libere la memoire du mutex
+} 
 
 void add_client(int client_sock) {
     pthread_mutex_lock(&clients_mutex);
@@ -71,9 +83,11 @@ void add_client(int client_sock) {
 bool no_space(const char * buffer){
     for (int i = 0; buffer[i] != '\0'; i++) {
         if (buffer[i] == ' '){
+            printf("ya un espace donc pas username \n");
             return false;
         }
     }
+    printf("pas d'espace : username on doit add\n");
     return true;
 }
 
@@ -81,10 +95,12 @@ bool add_username(char * buffer){
     pthread_mutex_lock(&clients_mutex);
 
     if (liste_client.client_count >= MAX_CLIENTS){
+        printf("trop de client \n");
         pthread_mutex_unlock(&clients_mutex); // si plus d'espace ret false
         return false;
     }
     if (!no_space(buffer)) {
+        printf(" dans func add username ya un espace \n");
         pthread_mutex_unlock(&clients_mutex);
         return false; // Le buffer contient un espace on ajoute pas 
     }
@@ -104,7 +120,20 @@ bool add_username(char * buffer){
 
 }
 
+// Ajouter un username à la liste des clients
+void add_username2(char * buffer) {
+    pthread_mutex_lock(&clients_mutex);
+    if (liste_client.client_count < MAX_CLIENTS) {
+        if (no_space(buffer)) {
+            liste_client.client_usernames[liste_client.client_count] = strdup(buffer); // Fixe un bug : utilisation de strdup
+        }
+    }
+    printClientUsernames();
+    pthread_mutex_unlock(&clients_mutex);
+}
+
 char* get_username(char *buffer) {
+    // osef juste faire strok du premier elem
     char *username = (char*)malloc(30 * sizeof(char)); // username max 30 octets
     if (!username) {
         perror("Erreur malloc \n");
@@ -122,43 +151,63 @@ char* get_username(char *buffer) {
 
 void *handle_client(void *client_sock) {
     int sock = *(int *)client_sock;
-    free(client_sock); // client_sock est inutile à présent
-    printf("allo le serv ??? \n");
+    free(client_sock); // client_sock est inutile à présent libere 
     char buffer[1024];
-    while (1) {
+    while (!sigint_recu) {
+   
         ssize_t bytes_read = read(sock, buffer, sizeof(buffer));
         if (bytes_read > 0) {
             buffer[bytes_read] = '\0'; // evite des bug
-            printf(" buffer : %s \n", buffer);
-
+            add_username2(buffer);
+            printf("le buffer : %s \n", buffer);
+            fflush(stdout);
+            char *recipient = strtok(buffer, " "); // get username
+            char *message = strtok(NULL, "");
+            printf(" msg and destinaire %s  / %s \n", message, recipient);
+            fflush(stdout);
             pthread_mutex_lock(&clients_mutex);
-            
-            if(!add_username(buffer)){   // ajoute un username dans la liste
-                // envoie un msg au client si le buffer n'est pas un username
-                printf(" ca marhce ou pas la zebi\n");
-                char* username = get_username(buffer);
-                for (int i = 0; i < liste_client.client_count; i++){
-                    
-                    if (strcmp(username, liste_client.client_usernames[i]) == 0){ // verifie si le username est présent
-                        printf(" ca marhce ou paaaaaaa\n");
-                        ssize_t bytes_wr = write(liste_client.client_sockets[i], buffer, strlen(buffer)); 
-                        if(bytes_wr<0){
-                            perror("erreur write");
-                            exit(1);
-                        }
-                        // envoie un message a la bonne personne 
+            if (recipient && message) {
+                pthread_mutex_lock(&clients_mutex);
+
+                // Find the recipient in the list
+                int recipient_sock = -1;
+
+                for (int i = 0; i < liste_client.client_count; i++) {
+                    if (liste_client.client_usernames[i] != NULL &&
+                    strcmp(liste_client.client_usernames[i], recipient) == 0) {
+                        recipient_sock = liste_client.client_sockets[i];
+                        printf("%i\n",recipient_sock);
+                        break ;
                     }
                 }
-                free(username);
+
+                if (recipient_sock != -1) {
+                    // Debug: print recipient and message
+                    printf("Sending message to recipient socket %d: %s\n", recipient_sock, message);
+                    ssize_t sent_bytes = send(recipient_sock, message, strlen(message), 0);
+                    if (sent_bytes == -1) {
+                        perror("Error sending message to recipient");
+                    } else {
+                        printf("Message envoyé à %s : %s\n", recipient, message);
+                    }
+                }
+                else {
+                    // Notify sender that the recipient was not found
+                    char error_msg[256];
+                    snprintf(error_msg, sizeof(error_msg), "Cette personne (%s) n'est pas connectée.\n", recipient);
+                    const char *err_msg = "Recipient not found\n";
+                    // envoie a l'utilisateur le msg d'erreur
+                    ssize_t send_bytes = send(sock, err_msg, strlen(err_msg), 0); 
+                    if (send_bytes == -1) {
+                        perror("Erreur lors de l'envoi du message d'erreur à l'expéditeur");
+                    }
+                }
             }
-            printClientUsernames();
-            printf(" %s\n", buffer);
-            send(sock, "Message received!", strlen("Message received!"), 0); // osef mais j'ai laissé
-            
 
             pthread_mutex_unlock(&clients_mutex);
-        }
-        else if (bytes_read == 0) { // Le client a fermé la connexion
+
+        }else if (bytes_read == 0) { // Le client a fermé la connexion
+    // SIGINT DOIT DECO TLMD 
                 printf("Client disconnected: socket %d\n", sock);
                 close(sock);
                 pthread_mutex_lock(&clients_mutex);
@@ -183,8 +232,6 @@ void *handle_client(void *client_sock) {
 }
 
 void sock_creation(){
-    printf(" 1 \n");
-    fflush(stdout);
     const char *port_str = getenv("PORT_SERVEUR");
     int port = 1234; // Default port
     if (port_str != NULL) {
@@ -193,40 +240,31 @@ void sock_creation(){
             port = 1234; // Reset to default if out of range
         }
     }
-    printf(" 2\n ");
-    fflush(stdout);
+
     liste_client.client_count = 0; // initialise à 0
 
     int server_fd = checked(socket (AF_INET , SOCK_STREAM , 0)); // Créer le socket
-    printf("2.5\n");
-    fflush(stdout);
     int opt = 1;
     // Permet la réutilisation du port/de l'adresse
     if (setsockopt (server_fd , SOL_SOCKET , SO_REUSEADDR | SO_REUSEPORT , &opt , sizeof (opt )) < 0){
-        perror("sock");
+        perror("setsock");
     }
     struct sockaddr_in address ;
     address . sin_family = AF_INET ;
     address . sin_addr .s_addr = INADDR_ANY ;
     address . sin_port = htons (port);
-    fflush(stdout);
+ 
     // Définit l'adresse et le port d'écoute , réserve le port
     checked(bind(server_fd , ( struct sockaddr *)& address , sizeof ( address )));
-    printf(" 3 \n");
-    fflush(stdout);
     // Commence l'écoute
     checked(listen (server_fd , 5)); // maximum 3 connexions en attente
     size_t addrlen = sizeof ( address );
     // Ouvre une nouvelle connexion
-    printf(" 4 \n ");
-    fflush(stdout);
-   
-
-    while (1) {
-        printf(" 5 \n");
+    while (!sigint_recu) {
+        
         fflush(stdout);
         int new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
-        printf("6  Nouvelle connexion acceptée : socket %d\n", new_socket);
+        printf(" Nouvelle connexion acceptée : socket %d\n", new_socket);
         fflush(stdout);
         if (new_socket >= 0) {
             int *client_sock = (int*)malloc(sizeof(int));
@@ -235,10 +273,9 @@ void sock_creation(){
                 close(new_socket);
                 continue; // passe au prochain client
             }
-            add_client(new_socket);
+            
             *client_sock = new_socket;
-            printf("on arrive au thread \n");
-            fflush(stdout);
+            add_client(new_socket);
 
             pthread_t tid;
             if (pthread_create(&tid, NULL, handle_client, client_sock)!= 0) {
@@ -247,18 +284,22 @@ void sock_creation(){
                 free(client_sock);
                 continue;
             } // Passe au client suivant
+
+           
+                //pthread_detach(tid); // Automatically free thread resources
+                //free(client_sock);
+
             pthread_detach(tid); // Automatically free thread resources
         }
 
     }
-   close(server_fd);
+    shutdown_server(server_fd);
 
 }
 
 int main(void) {
-    printf(" 0 main faire perror au lieu de checked\n");
     signal(SIGINT, GestionnaireSigint);
-    signal(SIGPIPE, GestionnaireSigpipe);
+    signal(SIGPIPE, SIG_IGN);
     sock_creation();
     return 0;
 
