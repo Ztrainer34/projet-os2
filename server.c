@@ -38,12 +38,6 @@ struct ListeClient {
 
 struct ListeClient liste_client; 
 
-void printClientUsernames() {
-    printf("Liste des usernames des clients :\n");
-    for (int i = 0; i < liste_client.client_count; i++) {
-        printf("Client %d: Username=%s\n", i + 1, liste_client.client_usernames[i]);
-    }
-}
 
 static void GestionnaireSigint([[ maybe_unused ]] int sigint) {
    sigint_recu = 1;  // doit tout clean et fermer le programme
@@ -113,7 +107,6 @@ bool add_username(char * buffer){
     }
     printf("Username ajouté : %s\n", buffer);
     liste_client.client_count++; // incremente le nombre de client
-    printClientUsernames();
 
     pthread_mutex_unlock(&clients_mutex);
     return true;
@@ -128,26 +121,9 @@ void add_username2(char * buffer) {
             liste_client.client_usernames[liste_client.client_count] = strdup(buffer); // Fixe un bug : utilisation de strdup
         }
     }
-    printClientUsernames();
+    
     pthread_mutex_unlock(&clients_mutex);
 }
-
-char* get_username(char *buffer) {
-    // osef juste faire strok du premier elem
-    char *username = (char*)malloc(30 * sizeof(char)); // username max 30 octets
-    if (!username) {
-        perror("Erreur malloc \n");
-        exit(EXIT_FAILURE);
-    }
-    int i = 0;
-    while (buffer[i] != '\0' && buffer[i] != ' ') {
-        username[i] = buffer[i];
-        i++;
-    }
-    username[i] = '\0';
-    return username;
-}
-
 
 void *handle_client(void *client_sock) {
     int sock = *(int *)client_sock;
