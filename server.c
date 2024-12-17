@@ -33,7 +33,6 @@ pthread_mutex_t sigint_mutex = PTHREAD_MUTEX_INITIALIZER;
 // mutex pour empecher acces simultanée des threads sur sigint_recu
 
 int server_fd;
-int yu;
 struct ListeClient {
     int client_sockets[MAX_CLIENTS];  // Tableau pour stocker les sockets des clients
     int client_count;             // Nombre de clients connectés
