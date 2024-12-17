@@ -190,8 +190,14 @@ void* receive_messages(void* args) {
         ssize_t n = read(socket_fd, received_message, sizeof(received_message) - 1);
         if (n > 0) {
             received_message[n] = '\0'; // Null-terminate the string
-            printf("[Received] %s\n", received_message);
-            fflush(stdout);
+            if (strstr(received_message, "n'est pas connectée") != NULL) { 
+               // verifie si le destinataire n'est pas connecté via le serveur
+               fprintf(stderr, "%s", received_message); // affiche sur stderr
+            } 
+            else{ 
+               printf("[Received] %s\n", received_message);
+               fflush(stdout);
+            }
         } else if (n == 0) {
             printf("Server closed connection.\n");
             break;
