@@ -11,21 +11,26 @@
 #include <sys/mman.h>
 #include <errno.h>
 #include <pthread.h>
+#include <semaphore.h>
+
 #define MAX_PSEUDO_LENGTH 30
+#define SEM_NAME "/can_display_message"
+#define MEM_SIZE 1060
+
 size_t OFFSET = 0; //tracks how much space data occupies in shared memory
 sig_atomic_t trigger_sigint = 0; // tracks if ctrl+C was clicked
 sig_atomic_t PIPE_OK = 0; // tracks if pipes are open
 sig_atomic_t is_manual = 0; // tracks if manuel mode activated
-sig_atomic_t trigger_cleanup = 0;
+sig_atomic_t trigger_cleanup = 0; 
 struct sockaddr_in server_address;
-pthread_mutex_t storing_messages_mutex;
+
 
 typedef struct{
    int socket_fd;
    char* the_shared_memory;
    int is_bot_flag;
+   sem_t* semaphore;
 } ThreadArgs;
-
 
 
 /**
@@ -48,7 +53,7 @@ int validate_pseudo(const char *pseudo){
       fprintf(stderr,"invalid character\n");
       exit(3) ;
    }
-
+   
    return 0;
 }
 
@@ -83,8 +88,8 @@ int create_socket(){
 
    char* addr_variable_value ;
    addr_variable_value = getenv("IP_SERVEUR");
-
-   if(addr_variable_value != NULL){ //change the address
+   
+   if(addr_variable_value != NULL){ //change the address 
       success = inet_pton(AF_INET,addr_variable_value,&server_address.sin_addr);
       check_success(success);
    }
@@ -97,7 +102,7 @@ int create_socket(){
          server_address.sin_port = htons(value);
       }
    }
-
+   
    return client_fd;
 }
 
@@ -136,7 +141,7 @@ void store_in_memory(char* shared_memory, char* message, char* pseudo_memory) {
 }
 
 
-void send_messages(int socket_fd, const char* username, int isbot,int ismanual,char* shared_memory){
+void send_messages(int socket_fd, const char* username, int isbot,int ismanual,char* shared_memory,sem_t* semaphore){
     //retrieve message
     char message[1055]; //size sender's username
 
@@ -172,7 +177,9 @@ void send_messages(int socket_fd, const char* username, int isbot,int ismanual,c
                     exit(EXIT_FAILURE);
             }
             if (ismanual == 1 && !isbot){
-                display_messages(shared_memory);
+               sem_wait(semaphore);
+               display_messages(shared_memory);
+               sem_post(semaphore);
             }
      }
 
@@ -180,37 +187,56 @@ void send_messages(int socket_fd, const char* username, int isbot,int ismanual,c
 }
 
 
-void* receive_messages(void* args) {
-    char received_message[1055];
+void* receive_messages(void* args){
+   char received_message[1055];
 
-    ThreadArgs* thread_args = (ThreadArgs*)args;
-    int socket_fd = thread_args->socket_fd;
+   ThreadArgs* thread_args = (ThreadArgs* ) args;
+   int socket_fd = thread_args->socket_fd;
+   char* shared_memory = thread_args->the_shared_memory;
+   int is_bot = thread_args->is_bot_flag;
+   sem_t* print_semaphore = thread_args->semaphore;
 
-    while (1) {
-        ssize_t n = read(socket_fd, received_message, sizeof(received_message) - 1);
-        if (n > 0) {
-            received_message[n] = '\0'; // Null-terminate the string
-            if (strstr(received_message, "n'est pas connectée") != NULL) { 
-               // verifie si le destinataire n'est pas connecté via le serveur
-               fprintf(stderr, "%s", received_message); // affiche sur stderr
-            } 
-            else{ 
-               printf("[Received] %s\n", received_message);
+   while(1){
+      ssize_t n = read(socket_fd, received_message, sizeof(received_message));
+
+      if (n == 0){
+         perror("Entrée standard fermée");
+         close(socket_fd);
+         exit(0);
+      }
+      else if (n < 0){
+         perror("read");
+         close(socket_fd);
+         exit(EXIT_FAILURE);
+      }
+
+      else{
+         //separate sender from message
+         char* sender = strtok(received_message, " "); // split the sender's username with the message
+         char* message = strtok(NULL, "");  // the rest of the message
+         
+         if ((is_bot && is_manual) || (is_manual && !is_bot)){        // mode manual activated 
+               sem_wait(print_semaphore);
+               printf("\a");
                fflush(stdout);
+               store_in_memory(shared_memory,message, sender);
+               sem_post(print_semaphore);
             }
-        } else if (n == 0) {
-            printf("Server closed connection.\n");
-            break;
-        } else {
-            perror("Error reading from socket");
-            break;
-        }
-    }
+            else if(is_bot && !is_manual){ // mode bot only
+                printf("[%s] %s\n",sender,message);
+                fflush(stdout);
+            }
+            else if(!is_manual && !is_bot){ // without mode
+                printf("[\x1B[4m%s\x1B[0m] %s\n",sender,message);
+                fflush(stdout);
+            }
+            
+      }
 
-    close(socket_fd);
-    return NULL;
+   }
+   close(socket_fd);
+   return NULL;
 }
-
 
 
 
@@ -234,13 +260,9 @@ int main(int argc, char* argv[]) {
          is_manual = 1;
 
          //create shared memory
-         const int protection = PROT_READ | PROT_WRITE;
-         const int visibility = MAP_SHARED | MAP_ANONYMOUS;
-         shared_memory = (char*)mmap(NULL, 4096,protection, visibility, -1, 0);
-
-         if(shared_memory == MAP_FAILED ){
-               perror("mmap");
-               exit(EXIT_FAILURE);
+         if((shared_memory = (char*) malloc(MEM_SIZE)) == NULL){ //allocate memory to store messages
+            perror("malloc");
+            return -1;
          }
       }
       else{
@@ -249,34 +271,37 @@ int main(int argc, char* argv[]) {
       }
    }
 
-   int client_fd; //create socket
+   sem_t* print_semaphore = sem_open(SEM_NAME,O_CREAT,0666,1); //create + open semaphore
+
+
+   int client_fd; //create socket 
    client_fd = create_socket();
 
-
+   // Connect client to server
    if(connect(client_fd, (struct sockaddr *)&server_address, sizeof(server_address)) < 0) {
-         perror("Connect failed ha");
-         close(client_fd);
+        perror("Connect failed ha");
+        close(client_fd);
         return EXIT_FAILURE;
-    }
-
-   write(client_fd,username,strlen(username) + 1); // send username to server to identify client
-
-   // create a thread to read from socket
+   }
+   size_t username_size  = strlen(username);
+   ssize_t sent_bytes = send(client_fd,username,username_size,0);// send username to server to identify client
+   if(sent_bytes == -1){ //error handling
+      perror("send failed");
+      return -1;
+   }
+   
    pthread_t reading_thread;
-
    ThreadArgs arguments;
    arguments.socket_fd = client_fd;
    arguments.is_bot_flag = is_bot;
    arguments.the_shared_memory = shared_memory;
-   pthread_create(&reading_thread, NULL, &receive_messages, (void*)&arguments);
+   arguments.semaphore = print_semaphore;
+   pthread_create(&reading_thread,NULL,&receive_messages,(void*)&arguments);  
 
-   // Run send_messages in the main thread concurrently
-   send_messages(client_fd, username, is_bot, is_manual, shared_memory);
-
-   // Optional: Wait for the reading thread to finish when exiting
-   pthread_cancel(reading_thread); // Cancel the reading thread
-   pthread_join(reading_thread, NULL);
-
+   send_messages(client_fd,username,is_bot,is_manual,shared_memory,print_semaphore);
+   // create a thread to read from socket
+   
+   pthread_join(reading_thread,NULL); // wait for the thread to terminate   
 
 
 
