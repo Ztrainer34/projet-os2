@@ -29,21 +29,52 @@ static volatile sig_atomic_t triggerCleanup = 0;
 
 
 pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;  // Mutex pour synchroniser
+pthread_mutex_t sigint_mutex = PTHREAD_MUTEX_INITIALIZER; 
+// mutex pour empecher acces simultanée des threads sur sigint_recu
 
+int server_fd;
+int yu;
 struct ListeClient {
     int client_sockets[MAX_CLIENTS];  // Tableau pour stocker les sockets des clients
     int client_count;             // Nombre de clients connectés
+    pthread_t client_threads[MAX_CLIENTS];
     char* client_usernames[MAX_CLIENTS];
 };
 
 struct ListeClient liste_client; 
 
+void* gestionnaire_sigint_thread(void* set_){
+    int sig;
+    sigset_t *set = (sigset_t *)set_;
 
-static void GestionnaireSigint([[ maybe_unused ]] int sigint) {
-   sigint_recu = 1;  // doit tout clean et fermer le programme
+    if (sigwait(set, &sig) != 0) { // attend le bon signal 
+        perror("Erreur lors de l'attente du signal");
+
+    }
+
+    if (sig == SIGINT) {// Utilisez `shutdown` pour interrompre `accept`
+    printf(" SERV FD handler %d \n", server_fd);
+        if (shutdown(server_fd, SHUT_RDWR) < 0) {
+            perror("Erreur lors du shutdown du serveur");
+        }
+        printf("Signal SIGINT reçu. Fermeture du serveur...\n");
+        pthread_mutex_lock(&sigint_mutex);
+        sigint_recu = 1; // Déclenche la fermeture
+        pthread_mutex_unlock(&sigint_mutex);
+    }
+
+    return NULL;
 }
 
-void shutdown_server(int server_fd){
+
+void printClientUsernames() {
+    printf("Liste des usernames des clients :\n");
+    for (int i = 0; i < liste_client.client_count; i++) {
+        printf("Client %d: Username=%s\n", i + 1, liste_client.client_usernames[i]);
+    }
+}
+
+void shutdown_server(){
     printf(" serveur se ferme \n ");
     pthread_mutex_lock(&clients_mutex);
     const char* server_shutdown = " Déconnexion du serveur. \n";
@@ -52,20 +83,33 @@ void shutdown_server(int server_fd){
         // envoie un msg a chaque client que le serveur se déconnecte
         if(liste_client.client_usernames[i]){
             free(liste_client.client_usernames[i]);
+            liste_client.client_usernames[i] = NULL; // Évitez une double libération
         }
-        close(liste_client.client_sockets[i]);
-    }
+        pthread_detach(liste_client.client_threads[i]);
+        /**int ret = pthread_join(liste_client.client_threads[i], NULL);
+        if (ret != 0) {
+            printf("Erreur pthread_join pour le thread %d : %s\n", i + 1, strerror(ret));
+        }*/
+        close(liste_client.client_sockets[i]); 
+        
+     }
+
+
+    printf(" EFNIN FINI \n");
     close(server_fd);
     liste_client.client_count = 0;
     pthread_mutex_unlock(&clients_mutex);
-
     pthread_mutex_destroy(&clients_mutex); // libere la memoire du mutex
+    exit(EXIT_SUCCESS);
 } 
 
-void add_client(int client_sock) {
+void add_client(int client_sock, pthread_t tid) {
     pthread_mutex_lock(&clients_mutex);
     if (liste_client.client_count < MAX_CLIENTS) {
-        liste_client.client_sockets[liste_client.client_count++] = client_sock;
+        liste_client.client_threads[liste_client.client_count] = tid; 
+        liste_client.client_sockets[liste_client.client_count] = client_sock;
+        liste_client.client_usernames[liste_client.client_count] = NULL; // Initialise à NULL
+        liste_client.client_count++; // passe au prochain client
     
     } else {
         printf("Max clients reached. Connection refused.\n");
@@ -85,43 +129,17 @@ bool no_space(const char * buffer){
     return true;
 }
 
-bool add_username(char * buffer){
-    pthread_mutex_lock(&clients_mutex);
-
-    if (liste_client.client_count >= MAX_CLIENTS){
-        printf("trop de client \n");
-        pthread_mutex_unlock(&clients_mutex); // si plus d'espace ret false
-        return false;
-    }
-    if (!no_space(buffer)) {
-        printf(" dans func add username ya un espace \n");
-        pthread_mutex_unlock(&clients_mutex);
-        return false; // Le buffer contient un espace on ajoute pas 
-    }
-    liste_client.client_usernames[liste_client.client_count] = strdup(buffer); // alloue mem
-    // ajoute un username si espace libre
-    if (!liste_client.client_usernames[liste_client.client_count]) {
-        perror("Échec de l'allocation mémoire");
-        pthread_mutex_unlock(&clients_mutex);
-        return false;
-    }
-    printf("Username ajouté : %s\n", buffer);
-    liste_client.client_count++; // incremente le nombre de client
-
-    pthread_mutex_unlock(&clients_mutex);
-    return true;
-
-}
 
 // Ajouter un username à la liste des clients
-void add_username2(char * buffer) {
+void add_username(char * buffer) {
     pthread_mutex_lock(&clients_mutex);
-    if (liste_client.client_count < MAX_CLIENTS) {
+    int idx = liste_client.client_count - 1; // Dernier client ajouté
+    if (liste_client.client_count < MAX_CLIENTS && liste_client.client_usernames[idx] == NULL) {
         if (no_space(buffer)) {
-            liste_client.client_usernames[liste_client.client_count] = strdup(buffer); // Fixe un bug : utilisation de strdup
+            liste_client.client_usernames[idx] = strdup(buffer); // Fixe un bug : utilisation de strdup
         }
     }
-    
+    printClientUsernames();
     pthread_mutex_unlock(&clients_mutex);
 }
 
@@ -133,25 +151,25 @@ void *handle_client(void *client_sock) {
    
         ssize_t bytes_read = read(sock, buffer, sizeof(buffer));
         if (bytes_read > 0) {
+
             buffer[bytes_read] = '\0'; // evite des bug
-            add_username2(buffer);
-            printf("le buffer : %s \n", buffer);
-            fflush(stdout);
+            add_username(buffer);
+
             char *recipient = strtok(buffer, " "); // get username
             char *message = strtok(NULL, "");
-            printf(" msg and destinaire %s  / %s \n", message, recipient);
-            fflush(stdout);
-            pthread_mutex_lock(&clients_mutex);
+
+            
             if (recipient && message) {
-    
+                pthread_mutex_lock(&clients_mutex);
 
                 // Find the recipient in the list
                 int recipient_sock = -1;
-
+                char *name ;
                 for (int i = 0; i < liste_client.client_count; i++) {
                     if (liste_client.client_usernames[i] != NULL &&
                     strcmp(liste_client.client_usernames[i], recipient) == 0) {
                         recipient_sock = liste_client.client_sockets[i];
+                        name = liste_client.client_usernames[i];
                         printf("%i\n",recipient_sock);
                         break ;
                     }
@@ -159,7 +177,7 @@ void *handle_client(void *client_sock) {
 
                 if (recipient_sock != -1) {
                     // Debug: print recipient and message
-                    printf("Sending message to recipient socket %d: %s\n", recipient_sock, message);
+                    printf("Sending message to recipient socket %d: %s\n", recipient_sock, name);
                     ssize_t sent_bytes = send(recipient_sock, message, strlen(message), 0);
                     if (sent_bytes == -1) {
                         perror("Error sending message to recipient");
@@ -169,18 +187,19 @@ void *handle_client(void *client_sock) {
                 }
                 else {
                     // Notify sender that the recipient was not found
-                    char error_msg[256];
+                    char error_msg[64];
                     snprintf(error_msg, sizeof(error_msg), "Cette personne (%s) n'est pas connectée.\n", recipient);
-                    const char *err_msg = "Recipient not found\n";
+                    //const char *err_msg = "Recipient not found\n"; // remplacer par cette prsn pas co
                     // envoie a l'utilisateur le msg d'erreur
-                    ssize_t send_bytes = send(sock, err_msg, strlen(err_msg), 0); 
+                    ssize_t send_bytes = send(sock, error_msg, strlen(error_msg), 0); 
                     if (send_bytes == -1) {
                         perror("Erreur lors de l'envoi du message d'erreur à l'expéditeur");
                     }
                 }
+                pthread_mutex_unlock(&clients_mutex);
             }
 
-            pthread_mutex_unlock(&clients_mutex);
+            
 
         }else if (bytes_read == 0) { // Le client a fermé la connexion
     // SIGINT DOIT DECO TLMD 
@@ -189,21 +208,29 @@ void *handle_client(void *client_sock) {
                 pthread_mutex_lock(&clients_mutex);
                 for (int i = 0; i < liste_client.client_count; i++) {
                     if (liste_client.client_sockets[i] == sock) {
+                                    // Vérifiez avant de libérer le username
+                        if (liste_client.client_usernames[i] != NULL) {
+                            free(liste_client.client_usernames[i]);
+                            liste_client.client_usernames[i] = NULL; // Évitez une double libération
+                        }
+
                         liste_client.client_sockets[i] = liste_client.client_sockets[--liste_client.client_count];
-                        free(liste_client.client_usernames[i]); // Libère la mémoire allouée pour le username
+                        
                         break;
                     }
                 }
                 pthread_mutex_unlock(&clients_mutex);
+                break;
         }
         else if (bytes_read < 0){
-            perror("erreur lord de la lecture");
+            perror("Erreur lors de la lecture \n");
             // faire fonction cleanup
         }
         
     }
+    printf(" HANDLE CLIENT FINI ?  \n");
     
-    close(sock);
+    //close(sock);
     return NULL;
 }
 
@@ -219,7 +246,7 @@ void sock_creation(){
 
     liste_client.client_count = 0; // initialise à 0
 
-    int server_fd = checked(socket (AF_INET , SOCK_STREAM , 0)); // Créer le socket
+    server_fd = checked(socket (AF_INET , SOCK_STREAM , 0)); // Créer le socket
     int opt = 1;
     // Permet la réutilisation du port/de l'adresse
     if (setsockopt (server_fd , SOL_SOCKET , SO_REUSEADDR | SO_REUSEPORT , &opt , sizeof (opt )) < 0){
@@ -236,12 +263,8 @@ void sock_creation(){
     checked(listen (server_fd , 5)); // maximum 3 connexions en attente
     size_t addrlen = sizeof ( address );
     // Ouvre une nouvelle connexion
-    while (!sigint_recu) {
-        
-        fflush(stdout);
+    while (!sigint_recu) { 
         int new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
-        printf(" Nouvelle connexion acceptée : socket %d\n", new_socket);
-        fflush(stdout);
         if (new_socket >= 0) {
             int *client_sock = (int*)malloc(sizeof(int));
             if (client_sock == NULL) {
@@ -251,33 +274,66 @@ void sock_creation(){
             }
             
             *client_sock = new_socket;
-            add_client(new_socket);
 
             pthread_t tid;
-            if (pthread_create(&tid, NULL, handle_client, client_sock)!= 0) {
-                perror("Erreur lors de la création du thread client");
+
+            if (pthread_create(&tid, NULL, handle_client, client_sock)== 0) {
+                add_client(new_socket, tid);
+                
+            } // Passe au client suivant
+            else{
+                perror("Erreur lors de la création du thread client\n");
                 close(*client_sock);
                 free(client_sock);
                 continue;
-            } // Passe au client suivant
+            }
 
            
                 //pthread_detach(tid); // Automatically free thread resources
                 //free(client_sock);
 
-            pthread_detach(tid); // Automatically free thread resources
+            //pthread_detach(tid); // Automatically free thread resources
+        }   // osf on use join
+        else{
+            printf("on cancel le serv fd\n");
+            break;
         }
 
     }
-    shutdown_server(server_fd);
+    printf("shutdown stp \n");
+    shutdown_server();
+    //for (int i = 0; i < liste_client.client_count; i++) {
+      //  pthread_join(liste_client.client_threads[i], NULL);
+    //}
+    
 
 }
 
+
 int main(void) {
     liste_client.client_count = 0; 
-    signal(SIGINT, GestionnaireSigint);
+
+    pthread_t signal_tid;
+
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+
+    if (pthread_sigmask(SIG_BLOCK, &set, NULL) != 0) {
+        // bloque les signaux dans les threads clients et principaux
+        perror("Erreur lors du blocage des signaux"); 
+        exit(EXIT_FAILURE);
+    }
+    if (pthread_create(&signal_tid, NULL, gestionnaire_sigint_thread, &set) != 0) {
+        perror("Erreur lors de la création du thread gestionnaire de signaux");
+        exit(EXIT_FAILURE);
+    }
+    // crée un thread spécifique qui gère le signal
+
     signal(SIGPIPE, SIG_IGN);
     sock_creation();
+    pthread_join(signal_tid, NULL);
+
     return 0;
 
 }
