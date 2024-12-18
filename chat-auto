@@ -1,2 +1,56 @@
 #!/bin/bash
 
+# Nom du programme à exécuter
+PROGRAM="./chat"
+
+# Vérifier si le pseudonyme a été passé en argument
+if [[ -z "$1" ]]; then
+    echo "Usage: $0 <votre_pseudonyme>"
+    exit 1
+fi
+
+# Initialisation des variables
+PSEUDO="$1"   # Le pseudonyme est récupéré du premier argument
+DESTINATAIRE=""
+
+# Fonction pour récupérer le destinataire
+function get_destinataire() {
+    while true; do
+        read -p "Entrez le pseudonyme du destinataire (Ctrl+D pour quitter) : " DESTINATAIRE
+        if [[ $? -ne 0 ]]; then
+            echo "Fin du chat."
+            exit 0
+        elif [[ -n "$DESTINATAIRE" ]]; then
+            break
+        else
+            echo "Pseudonyme du destinataire vide. Veuillez réessayer."
+        fi
+    done
+}
+
+# Lancement du coprocessus avec le programme "chat"
+coproc CHAT_PROCESS { $PROGRAM "$PSEUDO"; }
+
+# Boucle principale : destinataire et messages
+while true; do
+    get_destinataire  # Demander un destinataire
+
+    # Lire et envoyer les messages pour le destinataire courant
+    while true; do
+        read -p "Message pour $DESTINATAIRE (Ctrl+D pour changer de destinataire) : " MESSAGE
+        if [[ $? -ne 0 ]]; then
+            echo "Changement de destinataire (Ctrl+D détecté)."
+            break  # Sortir de la boucle des messages pour changer de destinataire
+        elif [[ -n "$MESSAGE" ]]; then
+            FORMATTED_MESSAGE="$DESTINATAIRE $MESSAGE"
+            echo "$FORMATTED_MESSAGE" >&"${CHAT_PROCESS[1]}"
+        else
+            echo "Message vide. Veuillez saisir un message."
+        fi
+    done
+done
+
+# Terminer proprement le coprocessus
+exec {CHAT_PROCESS[1]}>&-
+wait "${CHAT_PROCESS_PID}"
+echo "Chat terminé."
