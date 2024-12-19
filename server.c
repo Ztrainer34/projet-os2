@@ -20,7 +20,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <pthread.h>
-
+#include <stdatomic.h>
 
 #include "../checked.h"
 #define MAX_CLIENTS 1000
@@ -29,10 +29,12 @@ static volatile sig_atomic_t triggerCleanup = 0;
 
 
 pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;  // Mutex pour synchroniser
-pthread_mutex_t sigint_mutex = PTHREAD_MUTEX_INITIALIZER; 
+pthread_mutex_t sigint_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t server_fd_mutex = PTHREAD_MUTEX_INITIALIZER;
 // mutex pour empecher acces simultanée des threads sur sigint_recu
 
-int server_fd;
+atomic_int server_fd;  // evite acces concurrent
+
 struct ListeClient {
     int client_sockets[MAX_CLIENTS];  // Tableau pour stocker les sockets des clients
     int client_count;             // Nombre de clients connectés
@@ -40,25 +42,25 @@ struct ListeClient {
     char* client_usernames[MAX_CLIENTS];
 };
 
-struct ListeClient liste_client; 
+struct ListeClient liste_client;
 
 void* gestionnaire_sigint_thread(void* set_){
     int sig;
     sigset_t *set = (sigset_t *)set_;
 
-    if (sigwait(set, &sig) != 0) { // attend le bon signal 
+    if (sigwait(set, &sig) != 0) { // attend le bon signal
         perror("Erreur lors de l'attente du signal");
 
     }
 
     if (sig == SIGINT) {// Utilisez `shutdown` pour interrompre `accept`
-    printf(" SERV FD handler %d \n", server_fd);
+
         if (shutdown(server_fd, SHUT_RDWR) < 0) {
             perror("Erreur lors du shutdown du serveur");
         }
         printf("Signal SIGINT reçu. Fermeture du serveur...\n");
         pthread_mutex_lock(&sigint_mutex);
-        sigint_recu = 1; // Déclenche la fermeture
+        sigint_recu = 1; // Déclenche la fermeture et gere la synchronisation
         pthread_mutex_unlock(&sigint_mutex);
     }
 
@@ -74,42 +76,43 @@ void printClientUsernames() {
 }
 
 void shutdown_server(){
-    printf(" serveur se ferme \n ");
+    printf("Déconnexion du serveur. \n");
     pthread_mutex_lock(&clients_mutex);
-    const char* server_shutdown = " Déconnexion du serveur. \n";
+    const char* server_shutdown = "Déconnexion du serveur. \n";
     for (int i = 0; i < liste_client.client_count; i++) {
-        send(liste_client.client_sockets[i], server_shutdown, strlen(server_shutdown), 0); 
+        ssize_t sent_bytes = send(liste_client.client_sockets[i], server_shutdown, strlen(server_shutdown), 0);
+        if(sent_bytes < 0){
+            perror("Erreur lors de l'envoi du message de déconnexion aux clients \n");
+        }
         // envoie un msg a chaque client que le serveur se déconnecte
         if(liste_client.client_usernames[i]){
             free(liste_client.client_usernames[i]);
             liste_client.client_usernames[i] = NULL; // Évitez une double libération
         }
         pthread_detach(liste_client.client_threads[i]);
-        /**int ret = pthread_join(liste_client.client_threads[i], NULL);
-        if (ret != 0) {
-            printf("Erreur pthread_join pour le thread %d : %s\n", i + 1, strerror(ret));
-        }*/
-        close(liste_client.client_sockets[i]); 
-        
+ 
+        close(liste_client.client_sockets[i]);
+
      }
 
-
-    printf(" EFNIN FINI \n");
     close(server_fd);
     liste_client.client_count = 0;
     pthread_mutex_unlock(&clients_mutex);
+
     pthread_mutex_destroy(&clients_mutex); // libere la memoire du mutex
-    exit(EXIT_SUCCESS);
-} 
+    pthread_mutex_destroy(&server_fd_mutex);
+    pthread_mutex_destroy(&sigint_mutex);
+    return;
+}
 
 void add_client(int client_sock, pthread_t tid) {
     pthread_mutex_lock(&clients_mutex);
     if (liste_client.client_count < MAX_CLIENTS) {
-        liste_client.client_threads[liste_client.client_count] = tid; 
+        liste_client.client_threads[liste_client.client_count] = tid;
         liste_client.client_sockets[liste_client.client_count] = client_sock;
         liste_client.client_usernames[liste_client.client_count] = NULL; // Initialise à NULL
         liste_client.client_count++; // passe au prochain client
-    
+
     } else {
         printf("Max clients reached. Connection refused.\n");
         close(client_sock);
@@ -144,11 +147,13 @@ void add_username(char * buffer) {
 
 void *handle_client(void *client_sock) {
     int sock = *(int *)client_sock;
-    free(client_sock); // client_sock est inutile à présent libere 
+    free(client_sock); // client_sock est inutile à présent libere
     char buffer[1024];
     while (!sigint_recu) {
-   
+
+        pthread_mutex_lock(&server_fd_mutex);
         ssize_t bytes_read = read(sock, buffer, sizeof(buffer));
+        pthread_mutex_unlock(&server_fd_mutex);
         if (bytes_read > 0) {
 
             buffer[bytes_read] = '\0'; // evite des bug
@@ -156,8 +161,8 @@ void *handle_client(void *client_sock) {
 
             char *recipient = strtok(buffer, " "); // get username
             char *message = strtok(NULL, "");
+            char *username = NULL;
 
-            
             if (recipient && message) {
                 pthread_mutex_lock(&clients_mutex);
 
@@ -165,21 +170,33 @@ void *handle_client(void *client_sock) {
                 int recipient_sock = -1;
                 char *name ;
                 for (int i = 0; i < liste_client.client_count; i++) {
+                    // Find the recipient's socket based on recipient's username
                     if (liste_client.client_usernames[i] != NULL &&
-                    strcmp(liste_client.client_usernames[i], recipient) == 0) {
+                        strcmp(liste_client.client_usernames[i], recipient) == 0) {
                         recipient_sock = liste_client.client_sockets[i];
                         name = liste_client.client_usernames[i];
-                        printf("%i\n",recipient_sock);
-                        break ;
+                        }
+
+                    // Find the sender's username based on the socket
+                    if (liste_client.client_sockets[i] == sock) {
+                        username = liste_client.client_usernames[i];
+                    }
+
+                    // Break early if both are found
+                    if (recipient_sock != -1 && username != NULL) {
+                        break;
                     }
                 }
 
                 if (recipient_sock != -1) {
                     // Debug: print recipient and message
-                    printf("Sending message to recipient socket %d: %s\n", recipient_sock, name);
-                    ssize_t sent_bytes = send(recipient_sock, message, strlen(message), 0);
+                    char formatted_message[1024];
+                    snprintf(formatted_message, sizeof(formatted_message), "%s %s", username, message);
+                    printf("Formatted message: %s\n", formatted_message);
+                    ssize_t sent_bytes = send(recipient_sock, formatted_message, strlen(formatted_message), 0);
                     if (sent_bytes == -1) {
-                        perror("Error sending message to recipient");
+                        perror("Erreur lors de l'envoi du message au destinaire. \n");
+                        shutdown_server();
                     } else {
                         printf("Message envoyé à %s : %s\n", recipient, message);
                     }
@@ -190,18 +207,19 @@ void *handle_client(void *client_sock) {
                     snprintf(error_msg, sizeof(error_msg), "Cette personne (%s) n'est pas connectée.\n", recipient);
                     //const char *err_msg = "Recipient not found\n"; // remplacer par cette prsn pas co
                     // envoie a l'utilisateur le msg d'erreur
-                    ssize_t send_bytes = send(sock, error_msg, strlen(error_msg), 0); 
+                    ssize_t send_bytes = send(sock, error_msg, strlen(error_msg), 0);
                     if (send_bytes == -1) {
                         perror("Erreur lors de l'envoi du message d'erreur à l'expéditeur");
+                        shutdown_server();
                     }
                 }
                 pthread_mutex_unlock(&clients_mutex);
             }
 
-            
+
 
         }else if (bytes_read == 0) { // Le client a fermé la connexion
-    // SIGINT DOIT DECO TLMD 
+    // SIGINT DOIT DECO TLMD
                 printf("Client disconnected: socket %d\n", sock);
                 close(sock);
                 pthread_mutex_lock(&clients_mutex);
@@ -214,7 +232,7 @@ void *handle_client(void *client_sock) {
                         }
 
                         liste_client.client_sockets[i] = liste_client.client_sockets[--liste_client.client_count];
-                        
+
                         break;
                     }
                 }
@@ -222,14 +240,10 @@ void *handle_client(void *client_sock) {
                 break;
         }
         else if (bytes_read < 0){
-            perror("Erreur lors de la lecture \n");
-            // faire fonction cleanup
+            perror("Erreur lors de la lecture du message \n");
+            shutdown_server();
         }
-        
     }
-    printf(" HANDLE CLIENT FINI ?  \n");
-    
-    //close(sock);
     return NULL;
 }
 
@@ -244,26 +258,28 @@ void sock_creation(){
     }
 
     liste_client.client_count = 0; // initialise à 0
-
+    pthread_mutex_lock(&server_fd_mutex);
     server_fd = checked(socket (AF_INET , SOCK_STREAM , 0)); // Créer le socket
     int opt = 1;
     // Permet la réutilisation du port/de l'adresse
     if (setsockopt (server_fd , SOL_SOCKET , SO_REUSEADDR | SO_REUSEPORT , &opt , sizeof (opt )) < 0){
         perror("setsock");
+        exit(EXIT_FAILURE);
     }
     struct sockaddr_in address ;
     address . sin_family = AF_INET ;
     address . sin_addr .s_addr = INADDR_ANY ;
     address . sin_port = htons (port);
- 
-    // Définit l'adresse et le port d'écoute , réserve le port
+
+    // définit l'adresse et le port d'écoute , réserve le port
     checked(bind(server_fd , ( struct sockaddr *)& address , sizeof ( address )));
     // Commence l'écoute
-    checked(listen (server_fd , 5)); // maximum 3 connexions en attente
+    checked(listen (server_fd , 5)); // maximum 5 connexions en attente
     size_t addrlen = sizeof ( address );
     // Ouvre une nouvelle connexion
-    while (!sigint_recu) { 
-        int new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
+    pthread_mutex_unlock(&server_fd_mutex);
+    while (!sigint_recu) {
+        int new_socket = checked(accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen));
         if (new_socket >= 0) {
             int *client_sock = (int*)malloc(sizeof(int));
             if (client_sock == NULL) {
@@ -271,14 +287,14 @@ void sock_creation(){
                 close(new_socket);
                 continue; // passe au prochain client
             }
-            
+
             *client_sock = new_socket;
 
             pthread_t tid;
 
             if (pthread_create(&tid, NULL, handle_client, client_sock)== 0) {
                 add_client(new_socket, tid);
-                
+
             } // Passe au client suivant
             else{
                 perror("Erreur lors de la création du thread client\n");
@@ -286,31 +302,14 @@ void sock_creation(){
                 free(client_sock);
                 continue;
             }
-
-           
-                //pthread_detach(tid); // Automatically free thread resources
-                //free(client_sock);
-
-            //pthread_detach(tid); // Automatically free thread resources
-        }   // osf on use join
-        else{
-            printf("on cancel le serv fd\n");
-            break;
-        }
-
+        } 
     }
-    printf("shutdown stp \n");
     shutdown_server();
-    //for (int i = 0; i < liste_client.client_count; i++) {
-      //  pthread_join(liste_client.client_threads[i], NULL);
-    //}
-    
-
 }
 
 
 int main(void) {
-    liste_client.client_count = 0; 
+    liste_client.client_count = 0;
 
     pthread_t signal_tid;
 
@@ -320,7 +319,7 @@ int main(void) {
 
     if (pthread_sigmask(SIG_BLOCK, &set, NULL) != 0) {
         // bloque les signaux dans les threads clients et principaux
-        perror("Erreur lors du blocage des signaux"); 
+        perror("Erreur lors du blocage des signaux");
         exit(EXIT_FAILURE);
     }
     if (pthread_create(&signal_tid, NULL, gestionnaire_sigint_thread, &set) != 0) {
@@ -331,7 +330,7 @@ int main(void) {
 
     signal(SIGPIPE, SIG_IGN);
     sock_creation();
-    pthread_join(signal_tid, NULL);
+    pthread_join(signal_tid, NULL); // dz
 
     return 0;
 
