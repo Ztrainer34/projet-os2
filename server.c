@@ -1,5 +1,3 @@
-#include <arpa/inet.h>
-#include <sys/socket.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,301 +8,375 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <errno.h>
+#include <arpa/inet.h>
+#include <stdbool.h>
+#include <stdint.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
 #include <pthread.h>
-#include <semaphore.h>
-
-#define MAX_PSEUDO_LENGTH 30
-#define SEM_NAME "/can_display_message"
-#define MEM_SIZE 1060
-
-size_t OFFSET = 0; //tracks how much space data occupies in shared memory
-sig_atomic_t trigger_sigint = 0; // tracks if ctrl+C was clicked
-sig_atomic_t PIPE_OK = 0; // tracks if pipes are open
-sig_atomic_t is_manual = 0; // tracks if manuel mode activated
-sig_atomic_t trigger_cleanup = 0;
-struct sockaddr_in server_address;
 
 
-typedef struct{
-   int socket_fd;
-   char* the_shared_memory;
-   int is_bot_flag;
-   sem_t* semaphore;
-} ThreadArgs;
+#include "../checked.h"
+#define MAX_CLIENTS 1000
+
+// Global variables for signal handling and client management
+static volatile sig_atomic_t sigint_recu = 0;
+static volatile sig_atomic_t triggerCleanup = 0;
+pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;  // Mutex for synchronising
+pthread_mutex_t sigint_mutex = PTHREAD_MUTEX_INITIALIZER;
+// A mutex is used to prevent simultaneous access by threads to sigint_recu
+
+int server_fd;
+
+// Structure to manage connected clients
+struct ListeClient {
+    int client_sockets[MAX_CLIENTS];  // Vector to store client sockets
+    int client_count;             // Numbers of client connected
+    pthread_t client_threads[MAX_CLIENTS];
+    char* client_usernames[MAX_CLIENTS];
+};
+
+struct ListeClient liste_client;
 
 
 /**
- * Function to validate a username (pseudo).
- * Ensures it adheres to character and length constraints.
- *
- * @param pseudo The username to validate.
- * @return 0 if valid, error codes otherwise.
+ * Signal handler thread for SIGINT.
+ * Waits for the SIGINT signal and sets a flag to shut down the server.
  */
-int validate_pseudo(const char *pseudo){
-   if (strlen(pseudo) > MAX_PSEUDO_LENGTH){
-      fprintf(stderr,"Pseudo length exceeded max length\n");
-      exit(2);
-   }
-   if (strpbrk(pseudo,"/-[]")){
-      fprintf(stderr,"invalid character\n");
-      exit(3);
-   }
-   if (strcmp(pseudo, ".") == 0 || strcmp(pseudo, "..") == 0){
-      fprintf(stderr,"invalid character\n");
-      exit(3) ;
-   }
+void* gestionnaire_sigint_thread(void* set_){
+    int sig;
+    sigset_t *set = (sigset_t *)set_;
 
-   return 0;
-}
+    if (sigwait(set, &sig) != 0) { // waiting for the signal
+        perror("Error while waiting for the signal");
 
-
-void check_success(int success){
-   if(success <= 0 ){
-      if(success == 0){
-         fprintf(stderr, "Not in presentation format");
-      }
-      else{
-         perror("inet_pton");
-         exit(EXIT_FAILURE);
-      }
-   }
-}
-
-
-int create_socket(){
-   int client_fd;
-   //initialise socket
-   if((client_fd = socket(AF_INET,SOCK_STREAM,0)) < 0){
-      perror("socket failed");
-      exit(EXIT_FAILURE);
-   }
-
-   // initialise the address + port number
-   server_address.sin_family = AF_INET;
-   server_address.sin_port = htons(1234);
-   int success;
-   success = inet_pton(AF_INET ,"127.0.0.1", &server_address.sin_addr);
-   check_success(success); // checks if inet_pton worked as intended
-
-   char* addr_variable_value ;
-   addr_variable_value = getenv("IP_SERVEUR");
-
-   if(addr_variable_value != NULL){ //change the address
-      success = inet_pton(AF_INET,addr_variable_value,&server_address.sin_addr);
-      check_success(success);
-   }
-
-   const char* port_value = getenv("PORT_SERVEUR"); // retrieve the value if the variable exists
-   if(port_value != NULL ){ //IP_SERVER is defined
-      int value;
-      value = atoi(port_value);
-      if (value >= 1 && value <= 65535) {
-         server_address.sin_port = htons(value);
-      }
-   }
-
-   return client_fd;
-}
-
-
-void display_messages(char* shared_memory){
-    printf("%s",shared_memory);
-    fflush(stdout);
-    memset(shared_memory, 0, 1024); // Clear 1024 bytes of shared memory
-    OFFSET = 0;
-}
-
-/**
- * Function to store a message in shared memory.
- * Automatically displays messages if memory reaches its limit.
- *
- * @param shared_memory Pointer to the shared memory created in the main.
- * @param message The message to be stored.
- */
-
-void store_in_memory(char* shared_memory, char* message, char* pseudo_memory) {
-    size_t message_size = strlen(message);
-    size_t pseudo_destinatair_size = strlen(pseudo_memory);
-    size_t total_size = message_size + pseudo_destinatair_size + 5; // +5 pour "[ ]: ", le '\n' et le '\0'
-
-    if (OFFSET + total_size >= 4096) { // Vérifie si la capacité mémoire est dépassée
-        display_messages(shared_memory);
-    } else {
-        // Formate l'entrée combinée comme "[pseudo_destinatair]: message\n"
-        snprintf(shared_memory + strlen(shared_memory),
-                 4096 - strlen(shared_memory),
-                 "[%s] %s\n",
-                 pseudo_memory, message);
-        //snprintf(shared_memory + OFFSET, SHARED_MEM_SIZE - OFFSET, "[%s] %s\n", pseudo_memory, message);
-        OFFSET += total_size;
     }
+
+    if (sig == SIGINT) {// use `shutdown` to interrompt `accept`
+
+
+        if (shutdown(server_fd, SHUT_RDWR) < 0) {
+            perror("Error while shutting down the server");
+        }
+
+        pthread_mutex_lock(&sigint_mutex);
+        sigint_recu = 1; // Déclenche la fermeture
+        pthread_mutex_unlock(&sigint_mutex);
+    }
+
+    return NULL;
 }
 
 
-void send_messages(int socket_fd, const char* username, int isbot,int ismanual,char* shared_memory,sem_t* semaphore){
-    //retrieve message
-    char message[1055]; //size sender's username
+/**
+ * Shuts down the server by closing all client connections and cleaning up resources.
+ */
 
-    while(1){
-            // Read user input
-            ssize_t n = read(STDIN_FILENO, message, sizeof(message) - 1);
-            if (n > 0) {
-               message[n - 1] = '\0'; // Remove newline
+void shutdown_server(){
+    printf(" serveur closed\n ");
+    pthread_mutex_lock(&clients_mutex);
+    const char* server_shutdown = " server disconected. \n";
+    for (int i = 0; i < liste_client.client_count; i++) {
+        send(liste_client.client_sockets[i], server_shutdown, strlen(server_shutdown), 0);
+        // envoie un msg a chaque client que le serveur se déconnecte
+        if(liste_client.client_usernames[i]){
+            free(liste_client.client_usernames[i]);
+            liste_client.client_usernames[i] = NULL; // Évitez une double libération
+        }
+        pthread_detach(liste_client.client_threads[i]);
 
-            } else if (n == -1 && errno == EINTR) {
-                // Interrupted by signal, continue
-                continue;
+        close(liste_client.client_sockets[i]);
 
-            } else if (n == 0) {  // termine le programme en retournant 0
-                perror("stdin fermé ou EOF atteint");
-                exit(0);
-
-            }
-             else if (n < 0) {
-                perror("Erreur lors de la lecture");
-                exit(EXIT_FAILURE);
-            }
-
-            uint32_t size = htonl(strlen(message));
-            ssize_t size_sent = write(socket_fd, &size, sizeof(size));
-            ssize_t success = write(socket_fd, message, strlen(message) + 1);
-            if(!isbot){
-                printf("[\x1B[4m%s\x1B[0m] %s\n", username, message);
-                fflush(stdout);
-            }
-            if (success == -1){
-                    perror("Erreur lors de l'écriture dans le pipe");
-                    close(socket_fd);
-                    exit(EXIT_FAILURE);
-            }
-            if (ismanual == 1 && !isbot){
-               sem_wait(semaphore);
-               display_messages(shared_memory);
-               sem_post(semaphore);
-            }
      }
 
-      close(socket_fd);
+
+
+    close(server_fd);
+    liste_client.client_count = 0;
+    pthread_mutex_unlock(&clients_mutex);
+    pthread_mutex_destroy(&clients_mutex); // libere la memoire du mutex
+    exit(EXIT_SUCCESS);
 }
 
 
-void* receive_messages(void* args){
-   char received_message[1055];
+/**
+ * Adds a client to the client list.
+ *
+ * @param client_sock Socket descriptor of the client.
+ * @param tid Thread ID handling the client.
+ */
+void add_client(int client_sock, pthread_t tid) {
+    pthread_mutex_lock(&clients_mutex);
+    if (liste_client.client_count < MAX_CLIENTS) {
+        liste_client.client_threads[liste_client.client_count] = tid;
+        liste_client.client_sockets[liste_client.client_count] = client_sock;
+        liste_client.client_usernames[liste_client.client_count] = NULL; // Initialise à NULL
+        liste_client.client_count++; // passe au prochain client
 
-   ThreadArgs* thread_args = (ThreadArgs* ) args;
-   int socket_fd = thread_args->socket_fd;
-   char* shared_memory = thread_args->the_shared_memory;
-   int is_bot = thread_args->is_bot_flag;
-   sem_t* print_semaphore = thread_args->semaphore;
-
-   while(1){
-      ssize_t n = read(socket_fd, received_message, sizeof(received_message));
-
-      if (n == 0){
-         perror("Entrée standard fermée");
-         close(socket_fd);
-         exit(0);
-      }
-      else if (n < 0){
-         perror("read");
-         close(socket_fd);
-         exit(EXIT_FAILURE);
-      }
-
-      else{
-         //separate sender from message
-         char* sender = strtok(received_message, " "); // split the sender's username with the message
-         char* message = strtok(NULL, "");  // the rest of the message
-
-         if ((is_bot && is_manual) || (is_manual && !is_bot)){        // mode manual activated
-               sem_wait(print_semaphore);
-               printf("\a");
-               fflush(stdout);
-               store_in_memory(shared_memory,message, sender);
-               sem_post(print_semaphore);
-            }
-            else if(is_bot && !is_manual){ // mode bot only
-                printf("[%s] %s\n",sender,message);
-                fflush(stdout);
-            }
-            else if(!is_manual && !is_bot){ // without mode
-                printf("[\x1B[4m%s\x1B[0m] %s\n",sender,message);
-                fflush(stdout);
-            }
-
-      }
-
-   }
-   close(socket_fd);
-   return NULL;
+    } else {
+        printf("Max clients reached. Connection refused.\n");
+        close(client_sock);
+    }
+    pthread_mutex_unlock(&clients_mutex);
 }
 
 
+/**
+ * Checks if a buffer contains spaces.
+ *
+ * @param buffer Input buffer.
+ * @return true if no spaces are found, false otherwise.
+ */
+bool no_space(const char * buffer){
+    for (int i = 0; buffer[i] != '\0'; i++) {
+        if (buffer[i] == ' '){
 
-int main(int argc, char* argv[]) {
-   //not enough arguments
-    if (argc < 2) {
-        fprintf(stderr, "chat pseudo_utilisateur pseudo_destinataire [--bot] [--manuel]\n");
-        return 1;
-   }
+            return false;
+        }
+    }
 
-   char *username = argv[1];
-   validate_pseudo(username);
+    return true;
+}
 
-   int is_bot = 0;
-   char* shared_memory = NULL;
-   for (int i = 2; i < argc; i++) {
-      if (strcmp(argv[i], "--bot") == 0) {
-         is_bot = 1;
-      }
-      else if (strcmp(argv[i], "--manuel") == 0) {
-         is_manual = 1;
+/**
+ * Adds a username to the client list.
+ *
+ * @param buffer The username string.
+ */
 
-         //create shared memory
-         if((shared_memory = (char*) malloc(MEM_SIZE)) == NULL){ //allocate memory to store messages
-            perror("malloc");
-            return -1;
-         }
-      }
-      else{
-         fprintf(stderr, "chat pseudo_utilisateur pseudo_destinataire [--bot] [--manuel]\n");
-         return -1;
-      }
-   }
+void add_username(char * buffer) {
+    pthread_mutex_lock(&clients_mutex);
+    int idx = liste_client.client_count - 1; // Dernier client ajouté
+    if (liste_client.client_count < MAX_CLIENTS && liste_client.client_usernames[idx] == NULL) {
+        if (no_space(buffer)) {
+            liste_client.client_usernames[idx] = strdup(buffer); // Fixe un bug : utilisation de strdup
+        }
+    }
 
-   sem_t* print_semaphore = sem_open(SEM_NAME,O_CREAT,0666,1); //create + open semaphore
-
-
-   int client_fd; //create socket
-   client_fd = create_socket();
-
-   // Connect client to server
-   if(connect(client_fd, (struct sockaddr *)&server_address, sizeof(server_address)) < 0) {
-        perror("Connect failed ha");
-        close(client_fd);
-        return EXIT_FAILURE;
-   }
-   size_t username_size  = strlen(username);
-   ssize_t sent_bytes = send(client_fd,username,username_size,0);// send username to server to identify client
-   if(sent_bytes == -1){ //error handling
-      perror("send failed");
-      return -1;
-   }
-
-   pthread_t reading_thread;
-   ThreadArgs arguments;
-   arguments.socket_fd = client_fd;
-   arguments.is_bot_flag = is_bot;
-   arguments.the_shared_memory = shared_memory;
-   arguments.semaphore = print_semaphore;
-   pthread_create(&reading_thread,NULL,&receive_messages,(void*)&arguments);
-
-   send_messages(client_fd,username,is_bot,is_manual,shared_memory,print_semaphore);
-   // create a thread to read from socket
-
-   pthread_join(reading_thread,NULL); // wait for the thread to terminate
+    pthread_mutex_unlock(&clients_mutex);
+}
 
 
+/**
+ * Handles client communication in a separate thread.
+ *
+ * @param client_sock Pointer to the client's socket descriptor.
+ * @return NULL
+ */
+void *handle_client(void *client_sock) {
+    int sock = *(int *)client_sock;
+    free(client_sock); // client_sock est inutile à présent libere
+    char buffer[1054];
+    while (!sigint_recu) {
 
-   return 0;
+        ssize_t bytes_read = read(sock, buffer, sizeof(buffer));
+        if (bytes_read > 0) {
+
+            buffer[bytes_read] = '\0'; // evite des bug
+            add_username(buffer);
+
+            char *recipient = strtok(buffer, " "); // get username
+            char *message = strtok(NULL, "");
+            char *username = NULL;
+
+            if (recipient && message) {
+                pthread_mutex_lock(&clients_mutex);
+
+                // Find the recipient in the list
+                int recipient_sock = -1;
+                char *name ;
+                for (int i = 0; i < liste_client.client_count; i++) {
+                    // Find the recipient's socket based on recipient's username
+                    if (liste_client.client_usernames[i] != NULL &&
+                        strcmp(liste_client.client_usernames[i], recipient) == 0) {
+                        recipient_sock = liste_client.client_sockets[i];
+                        name = liste_client.client_usernames[i];
+                        }
+
+                    // Find the sender's username based on the socket
+                    if (liste_client.client_sockets[i] == sock) {
+                        username = liste_client.client_usernames[i];
+                    }
+
+                    // Break early if both are found
+                    if (recipient_sock != -1 && username != NULL) {
+                        break;
+                    }
+                }
+
+                if (recipient_sock != -1) {
+                    // Debug: print recipient and message
+                    char formatted_message[1024];
+                    snprintf(formatted_message, sizeof(formatted_message), "%s %s", username, message);
+
+                    ssize_t sent_bytes = send(recipient_sock, formatted_message, strlen(formatted_message), 0);
+                    if (sent_bytes == -1) {
+                        perror("Error sending message to recipient");
+                    } else {
+                        printf("Message sent to %s : %s\n", recipient, message);
+                    }
+                }
+                else {
+                    // Notify sender that the recipient was not found
+                    char error_msg[64];
+                    snprintf(error_msg, sizeof(error_msg), "this personne (%s) is not connected.\n", recipient);
+                    //const char *err_msg = "Recipient not found\n"; // remplacer par cette prsn pas co
+                    // envoie a l'utilisateur le msg d'erreur
+                    ssize_t send_bytes = send(sock, error_msg, strlen(error_msg), 0);
+                    if (send_bytes == -1) {
+                        perror("Error while sending the error message to the sender");
+                    }
+                }
+                pthread_mutex_unlock(&clients_mutex);
+            }
+
+
+
+        }else if (bytes_read == 0) { // Le client a fermé la connexion
+    // SIGINT DOIT DECO TLMD
+                printf("Client disconnected: socket %d\n", sock);
+                close(sock);
+                pthread_mutex_lock(&clients_mutex);
+                for (int i = 0; i < liste_client.client_count; i++) {
+                    if (liste_client.client_sockets[i] == sock) {
+                                    // Vérifiez avant de libérer le username
+                        if (liste_client.client_usernames[i] != NULL) {
+                            free(liste_client.client_usernames[i]);
+                            liste_client.client_usernames[i] = NULL; // Évitez une double libération
+                        }
+
+                        liste_client.client_sockets[i] = liste_client.client_sockets[--liste_client.client_count];
+
+                        break;
+                    }
+                }
+                pthread_mutex_unlock(&clients_mutex);
+                break;
+        }
+        else if (bytes_read < 0){
+            perror("Error while reading\n");
+            // faire fonction cleanup
+        }
+
+    }
+
+
+    //close(sock);
+    return NULL;
+}
+
+
+/**
+ * Creates the server socket, binds it, and listens for incoming connections.
+ */
+void sock_creation(){
+    const char *port_str = getenv("PORT_SERVEUR");
+    int port = 1234; // Default port
+    if (port_str != NULL) {
+        port = atoi(port_str); // Convert to integer
+        if (port < 1 || port > 65535) {
+            port = 1234; // Reset to default if out of range
+        }
+    }
+
+    liste_client.client_count = 0; // initialise à 0
+
+    server_fd = checked(socket (AF_INET , SOCK_STREAM , 0)); // Créer le socket
+    int opt = 1;
+    // Permet la réutilisation du port/de l'adresse" translates to "Allows port/address reuse
+    if (setsockopt (server_fd , SOL_SOCKET , SO_REUSEADDR | SO_REUSEPORT , &opt , sizeof (opt )) < 0){
+        perror("setsock");
+    }
+    struct sockaddr_in address ;
+    address . sin_family = AF_INET ;
+    address . sin_addr .s_addr = INADDR_ANY ;
+    address . sin_port = htons (port);
+
+    // Defines the address and the listening port, reserves the port
+    checked(bind(server_fd , ( struct sockaddr *)& address , sizeof ( address )));
+    // start listening
+    checked(listen (server_fd , 5)); // Maximum 3 pending connections
+    size_t addrlen = sizeof ( address );
+    // Opens a new connection
+    while (!sigint_recu) {
+        int new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
+        if (new_socket >= 0) {
+            int *client_sock = (int*)malloc(sizeof(int));
+            if (client_sock == NULL) {
+                perror("malloc failed");
+                close(new_socket);
+                continue; // go to next client
+            }
+
+            *client_sock = new_socket;
+
+            pthread_t tid;
+
+            if (pthread_create(&tid, NULL, handle_client, client_sock)== 0) {
+                add_client(new_socket, tid);
+
+            } // go to next client
+            else{
+                perror("Error while creating the client thread\n");
+                close(*client_sock);
+                free(client_sock);
+                continue;
+            }
+
+
+                //pthread_detach(tid); // Automatically free thread resources
+                //free(client_sock);
+
+            //pthread_detach(tid); // Automatically free thread resources
+        }   // osf on use join
+        else{
+
+            break;
+        }
+
+    }
+
+    shutdown_server();
+    //for (int i = 0; i < liste_client.client_count; i++) {
+      //  pthread_join(liste_client.client_threads[i], NULL);
+    //}
+
+
+}
+
+/**
+ * Main function initializes signal handling and starts the server.
+ */
+int main(void) {
+    liste_client.client_count = 0;
+
+    pthread_t signal_tid;
+
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+
+    if (pthread_sigmask(SIG_BLOCK, &set, NULL) != 0) {
+        // Blocks signals in the client and main threads
+        perror("Error while blocking signals");
+        exit(EXIT_FAILURE);
+    }
+    if (pthread_create(&signal_tid, NULL, gestionnaire_sigint_thread, &set) != 0) {
+        perror("Error while creating the signal handler thread");
+        exit(EXIT_FAILURE);
+    }
+    // Creates a specific thread that handles the signal
+
+    signal(SIGPIPE, SIG_IGN);
+    sock_creation();
+    pthread_join(signal_tid, NULL);
+
+    return 0;
+
 }
