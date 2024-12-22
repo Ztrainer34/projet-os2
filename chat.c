@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <stdbool.h>
 
 
 #define MAX_PSEUDO_LENGTH 30
@@ -26,7 +27,7 @@ sig_atomic_t is_manual = 0; // tracks if manuel mode activated
 sig_atomic_t trigger_cleanup = 0;
 sig_atomic_t created_a_socket = 0;
 struct sockaddr_in server_address; //initialise structure for socket
-char* shared_memory = NULL;
+char* memory;
 /*Structure used to store the arguments passed in the secondary thead
 * It contains 3 elements:
 * the socket to intercept messages from other clients
@@ -36,6 +37,7 @@ typedef struct{
    int socket_fd;
    int is_bot_flag;
    sem_t* semaphore;
+   char* the_memory;
 } ThreadArgs;
 
 
@@ -74,15 +76,14 @@ void cleanup(char* memory, sem_t* semaphore,int socket){
 
 }
 
-
 static void sigint_handler(int signal){
    if(signal == SIGINT){
       if(created_a_socket && is_manual){
          trigger_sigint = 1; // the messages in memory shall be printed out
       }
       else if(is_manual && !created_a_socket){
-         free(shared_memory);
-         shared_memory = NULL;
+         free(memory);
+         memory = NULL;
          exit(4);
       }
       else{
@@ -123,7 +124,7 @@ int create_socket(){
    success = inet_pton(AF_INET ,"127.0.0.1", &server_address.sin_addr);
    check_address(success); // checks if inet_pton worked as intended
 
-   char* addr_variable_value ;
+   char* addr_variable_value;
    addr_variable_value = getenv("IP_SERVEUR");
 
    if(addr_variable_value != NULL){ //change the address
@@ -157,58 +158,68 @@ void display_messages(char* shared_memory){
     OFFSET = 0;
 }
 
+void print_shared_memory(char* shared_memory) {
+   printf("Current Shared Memory Content:\n");
+   printf("==============================\n");
+   printf("%s", shared_memory);
+   printf("==============================\n");
+   fflush(stdout);
+   OFFSET = 0;
+}
 
 
 /**
  * Function to store a message in shared memory.
  * Automatically displays messages if memory reaches its limit.
  *
- * @param shared_memory Pointer to the shared memory created in the main.
+ * @param memory Pointer to the shared memory created in the main.
  * @param message The message to be stored.
  */
-void store_in_memory(char* shared_memory, char* message, char* pseudo_memory, sem_t* semaphore) {
+void store_in_memory(char* memory, char* message, char* pseudo_memory, sem_t* semaphore) {
     size_t message_size = strlen(message);
     size_t pseudo_destinatair_size = strlen(pseudo_memory);
     size_t total_size = pseudo_destinatair_size + message_size + 5; // "[ ]: " + '\n' + '\0'
 
     if (OFFSET + total_size >= MEM_SIZE) {
         sem_wait(semaphore);
-        display_messages(shared_memory);
+        display_messages(memory);
         sem_post(semaphore);
     }
 
 
-    int bytes_written = snprintf(shared_memory + OFFSET, MEM_SIZE - OFFSET, "[%s] %s\n", pseudo_memory, message);
+    int bytes_written = snprintf(memory + OFFSET, MEM_SIZE - OFFSET, "[%s] %s\n", pseudo_memory, message);
 
     if (bytes_written < 0) {
-        perror("Error writing to shared memory");
+        perror("Error writing to memory");
         return;
     }
 
     OFFSET += bytes_written; // Increment OFFSET by actual bytes written
-
-
+    printf("Message stored in memory. Current OFFSET: %zu\n", OFFSET);
+    print_shared_memory(memory);
 }
 
 
 
 
 
-void send_messages(int socket_fd, const char* username, int isbot,sem_t* semaphore){
+void send_messages(int socket_fd, const char* username, int isbot,sem_t* semaphore,char* memory){
     //retrieve message
     char message[1056]; //size sender's username
 
     while(1){
             if(trigger_sigint && is_manual){
                sem_wait(semaphore);
-               display_messages(shared_memory);
+               display_messages(memory);
                sem_post(semaphore);
                trigger_sigint = 0; // reset the flag to 0
             }
             // Read user input
             ssize_t n = read(STDIN_FILENO, message, sizeof(message) - 1);
+
             if (n > 0) {
-               message[n - 1] = '\n'; // Remove newline
+               message[n - 1] = '\0'; // Remove newline
+               
 
             } else if (n == -1 && errno == EINTR) {
                 // Interrupted by signal, continue
@@ -216,36 +227,36 @@ void send_messages(int socket_fd, const char* username, int isbot,sem_t* semapho
 
             } else if (n == 0) {  // termine le programme en retournant 0
                perror("stdin fermé ou EOF atteint");
-               cleanup(shared_memory,semaphore,socket_fd);
+               cleanup(memory,semaphore,socket_fd);
                exit(0);
 
             }
              else if (n < 0) {
                 perror("Erreur lors de la lecture");
-                cleanup(shared_memory,semaphore,socket_fd);
+                cleanup(memory,semaphore,socket_fd);
                 exit(EXIT_FAILURE);
             }
-
-
-            ssize_t success = send(socket_fd, message, strlen(message),MSG_DONTWAIT);
-            if (success == -1){
+            ssize_t success1,success2;
+            success2 = send(socket_fd,n,sizeof(n),0); //send the size of the message
+            success1 = send(socket_fd, message, strlen(message),MSG_DONTWAIT);
+            if (success == -1 || success2 == -1){
                     perror("Erreur lors de l'écriture dans le pipe");
-                    cleanup(shared_memory,semaphore,socket_fd);
+                    cleanup(memory,semaphore,socket_fd);
                     exit(EXIT_FAILURE);
             }
 
 
             if(!isbot ){
                strtok(message, " ");
-               char* message = strtok(NULL, "");
+               char* the_message = strtok(NULL, "");
                sem_wait(semaphore);
-               printf("[\x1B[4m%s\x1B[0m] %s\n", username, message);
+               printf("[\x1B[4m%s\x1B[0m] %s\n", username, the_message);
                fflush(stdout);
                sem_post(semaphore);
             }
             if (is_manual == 1 && !isbot && OFFSET > 0){
                sem_wait(semaphore);
-               display_messages(shared_memory);
+               display_messages(memory);
                sem_post(semaphore);
             }
      }
@@ -256,13 +267,15 @@ void send_messages(int socket_fd, const char* username, int isbot,sem_t* semapho
 
 void* receive_messages(void* args){
    char received_message[1056]; //size of sender's name ,message and the space between them
-
+   
    ThreadArgs* thread_args = (ThreadArgs* ) args;
    int socket_fd = thread_args->socket_fd;
    int is_bot = thread_args->is_bot_flag;
    sem_t* print_semaphore = thread_args->semaphore;
+   char* memory = thread_args-> the_memory;
 
    while(1){
+      //read from the socket
       ssize_t n = read(socket_fd, received_message, sizeof(received_message));
       if (n == 0){
          perror("Entrée standard fermée");
@@ -274,11 +287,18 @@ void* receive_messages(void* args){
          cleanup(shared_memory,print_semaphore,socket_fd);
          exit(EXIT_FAILURE);
       }
-
       else{
          //separate sender from message
          char* sender = strtok(received_message, " "); // split the sender's username with the message
          char* message = strtok(NULL, "");
+
+         //verify if the server sent an error message
+         char not_connected[50];
+         snprintf(not_connected, strlen(not_connected), "this personne (%s) is not connected.", sender);
+         if(strncmp(received_message,not_connected,strlen(not_connected)) == 0){
+            fprintf(stderr, "%s\n",not_connected);
+            exit(EXIT_FAILURE);
+         }
 
          if(is_bot && is_manual){        // mode  bot and manual
                sem_wait(print_semaphore);
@@ -307,7 +327,7 @@ void* receive_messages(void* args){
                 printf("\a");
                 fflush(stdout);
                sem_post(print_semaphore);
-                store_in_memory(shared_memory,message, sender,print_semaphore);
+                store_in_memory(memory,message, sender,print_semaphore);
             }
 
       }
@@ -331,6 +351,7 @@ int main(int argc, char* argv[]) {
 
 
    int is_bot = 0;
+   char* memory ;
 
    for (int i = 2; i < argc; i++) {
       if (strcmp(argv[i], "--bot") == 0) {
@@ -340,34 +361,31 @@ int main(int argc, char* argv[]) {
          is_manual = 1;
 
          //create shared memory
-         if((shared_memory = (char*) malloc(MEM_SIZE)) == NULL){ //allocate memory to store messages
-            perror("malloc");
-            return -1;
-         }
+         memory = malloc(4096);
       }
       else{
-         fprintf(stderr, "chat pseudo_utilisateur[--bot] [--manuel]\n");
+         fprintf(stderr, "chat pseudo_utilisateur [--bot] [--manuel]\n");
          return -1;
       }
    }
-
+   
+   //handles signals
    struct sigaction sa;
    sa.sa_handler = sigint_handler;
    sa.sa_flags = 0;
    sigemptyset(&sa.sa_mask);
    if (sigaction(SIGINT, &sa, NULL) == -1) {
-      free(shared_memory);
-      shared_memory = NULL;
+      free(memory);
+      memory = NULL;
       perror("Erreur lors de l'initialisation du gestionnaire SIGINT");
       exit(EXIT_FAILURE);
    }
-
    int client_fd; //create socket
    client_fd = create_socket();
 
    // Connect client to server
    if(connect(client_fd, (struct sockaddr *)&server_address, sizeof(server_address)) < 0) {
-        cleanup(shared_memory,NULL,client_fd);
+        cleanup(memory,NULL,client_fd);
         perror("Connect failed");
         close(client_fd);
         return EXIT_FAILURE;
@@ -378,7 +396,7 @@ int main(int argc, char* argv[]) {
    ssize_t sent_bytes = send(client_fd,username,strlen(username),0);// send username to server to identify client
    if(sent_bytes == -1){ //error handling
       perror("send failed");
-      cleanup(shared_memory,print_semaphore,client_fd);
+      cleanup(memory,print_semaphore,client_fd);
       return -1;
    }
 
@@ -388,9 +406,10 @@ int main(int argc, char* argv[]) {
    arguments.socket_fd = client_fd;
    arguments.is_bot_flag = is_bot;
    arguments.semaphore = print_semaphore;
+   arguments.the_memory = memory;
    pthread_create(&reading_thread,NULL,&receive_messages,(void*)&arguments);
 
-   send_messages(client_fd,username,is_bot,print_semaphore);
+   send_messages(client_fd,username,is_bot,print_semaphore,memory);
 
 
    pthread_join(reading_thread,NULL); // wait for the thread to terminate
