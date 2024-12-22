@@ -62,7 +62,7 @@ void* gestionnaire_sigint_thread(void* set_){
         }
 
         pthread_mutex_lock(&sigint_mutex);
-        sigint_recu = 1; // Déclenche la fermeture
+        sigint_recu = 1; // -> shutdown the server
 
         pthread_mutex_unlock(&sigint_mutex);
     }
@@ -117,7 +117,7 @@ void add_client(int client_sock, pthread_t tid) {
         liste_client.client_threads[liste_client.client_count] = tid;
         liste_client.client_sockets[liste_client.client_count] = client_sock;
         liste_client.client_usernames[liste_client.client_count] = NULL; // Initialise à NULL
-        liste_client.client_count++; // passe au prochain client
+        liste_client.client_count++; // goto next client
 
     } else {
         printf("Max clients reached. Connection refused.\n");
@@ -270,7 +270,6 @@ void *handle_client(void *client_sock) {
                     char error_msg[64];
 
                     snprintf(error_msg, sizeof(error_msg), "Cette personne (%s) n'est pas connectée.\n", recipient);
-                    // envoie à l'utilisateur le msg d'erreur
                     ssize_t send_bytes = send(sock, error_msg, strlen(error_msg), 0);
                     if (send_bytes == -1) {
 
@@ -328,11 +327,10 @@ void sock_creation(){
         }
     }
 
-    liste_client.client_count = 0; // initialise à 0
+    liste_client.client_count = 0; // init to 0
     pthread_mutex_lock(&server_fd_mutex);
-    server_fd = checked(socket (AF_INET , SOCK_STREAM , 0)); // Créer le socket
-    int opt = 1;
-    // Permet la réutilisation du port/de l'adresse
+    server_fd = checked(socket (AF_INET , SOCK_STREAM , 0)); // Create socket
+    int opt = 1; 
     if (setsockopt (server_fd , SOL_SOCKET , SO_REUSEADDR | SO_REUSEPORT , &opt , sizeof (opt )) < 0){
         perror("setsock");
         exit(EXIT_FAILURE);
@@ -347,7 +345,7 @@ void sock_creation(){
     // Defines the address and the listening port, reserves the port
     checked(bind(server_fd , ( struct sockaddr *)& address , sizeof ( address )));
     // start listening
-    checked(listen (server_fd , 5)); // maximum 5 connexions en attente
+    checked(listen (server_fd , 5)); // maximum 5 connexions waiting
     size_t addrlen = sizeof ( address );
     // Opens a new connection
     pthread_mutex_unlock(&server_fd_mutex);
