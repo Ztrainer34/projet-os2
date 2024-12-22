@@ -30,6 +30,7 @@ static volatile sig_atomic_t sigint_recu = 0;
 static volatile sig_atomic_t triggerCleanup = 0;
 pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;  // Mutex for synchronising
 pthread_mutex_t sigint_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 // A mutex is used to prevent simultaneous access by threads to sigint_recu
 
 int server_fd;
@@ -43,6 +44,12 @@ struct ListeClient {
 };
 
 struct ListeClient liste_client;
+
+#include <unistd.h> // read()
+#include <stdio.h>  // perror()
+#include <errno.h>  // errno
+
+
 
 
 /**
@@ -169,13 +176,50 @@ void add_username(char * buffer) {
  * @param client_sock Pointer to the client's socket descriptor.
  * @return NULL
  */
+
+
+int SafeRead(int fd, char* buffer, size_t size) {
+    int total_read = 0, ret;
+
+    // Continue reading until no more data is available (EOF)
+    while (true) {
+        ret = read(fd, buffer + total_read, size - total_read);
+
+        if (ret > 0) {
+            total_read += ret;
+
+
+            break;
+        } else if (ret == 0) {  // End of file reached
+
+            break;
+        } else {  // Error or interrupted read
+            if (errno == EINTR) {
+
+                continue;
+            } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+
+                break;
+            } else {
+
+                return -1; // Indicate error
+            }
+        }
+    }
+
+
+    return total_read; // Return total bytes read
+}
+
+
+
 void *handle_client(void *client_sock) {
     int sock = *(int *)client_sock;
     free(client_sock); // client_sock est inutile à présent libere
     char buffer[1054];
     while (!sigint_recu) {
 
-        ssize_t bytes_read = read(sock, buffer, sizeof(buffer));
+        ssize_t bytes_read = SafeRead(sock, buffer, sizeof(buffer));
         if (bytes_read > 0) {
 
             buffer[bytes_read] = '\0'; // evite des bug
