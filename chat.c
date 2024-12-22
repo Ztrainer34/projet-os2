@@ -23,7 +23,7 @@ size_t OFFSET = 0; //tracks how much space data occupies in shared memory
 sig_atomic_t trigger_sigint = 0; // tracks if ctrl+C was clicked
 sig_atomic_t PIPE_OK = 0; // tracks if pipes are open
 sig_atomic_t is_manual = 0; // tracks if manuel mode activated
-sig_atomic_t trigger_cleanup = 0; 
+sig_atomic_t trigger_cleanup = 0;
 sig_atomic_t created_a_socket = 0;
 struct sockaddr_in server_address; //initialise structure for socket
 char* shared_memory = NULL;
@@ -59,7 +59,7 @@ int validate_pseudo(const char *pseudo){
       fprintf(stderr,"invalid character\n");
       exit(3) ;
    }
-   
+
    return 0;
 }
 
@@ -71,7 +71,7 @@ void cleanup(char* memory, sem_t* semaphore,int socket){
       free(memory);
       memory = NULL;
    }
-   
+
 }
 
 
@@ -125,8 +125,8 @@ int create_socket(){
 
    char* addr_variable_value ;
    addr_variable_value = getenv("IP_SERVEUR");
-   
-   if(addr_variable_value != NULL){ //change the address 
+
+   if(addr_variable_value != NULL){ //change the address
       success = inet_pton(AF_INET,addr_variable_value,&server_address.sin_addr);
       check_address(success);
    }
@@ -139,7 +139,7 @@ int create_socket(){
          server_address.sin_port = htons(value);
       }
    }
-   
+
    return client_fd;
 }
 
@@ -158,6 +158,7 @@ void display_messages(char* shared_memory){
 }
 
 
+
 /**
  * Function to store a message in shared memory.
  * Automatically displays messages if memory reaches its limit.
@@ -165,27 +166,32 @@ void display_messages(char* shared_memory){
  * @param shared_memory Pointer to the shared memory created in the main.
  * @param message The message to be stored.
  */
-
-void store_in_memory(char* shared_memory, char* message, char* pseudo_memory,sem_t* semaphore) {
+void store_in_memory(char* shared_memory, char* message, char* pseudo_memory, sem_t* semaphore) {
     size_t message_size = strlen(message);
     size_t pseudo_destinatair_size = strlen(pseudo_memory);
-    size_t total_size = message_size + pseudo_destinatair_size + 5; // +5 pour "[ ]: ", le '\n' et le '\0'
+    size_t total_size = pseudo_destinatair_size + message_size + 5; // "[ ]: " + '\n' + '\0'
 
-    if (OFFSET + total_size >= 4096) { // Vérifie si la capacité mémoire est dépassée
-       sem_wait(semaphore);
-       display_messages(shared_memory);
-       sem_post(semaphore);
-    } else {
-        // Formate l'entrée combinée comme "[pseudo_destinatair]: message\n"
-        snprintf(shared_memory + OFFSET,
-                 4096 - OFFSET,
-                 "[%s] %s\n",
-                 pseudo_memory, message);
-        //snprintf(shared_memory + OFFSET, SHARED_MEM_SIZE - OFFSET, "[%s] %s\n", pseudo_memory, message);
-        OFFSET += total_size;
-       
+    if (OFFSET + total_size >= MEM_SIZE) {
+        sem_wait(semaphore);
+        display_messages(shared_memory);
+        sem_post(semaphore);
     }
+
+
+    int bytes_written = snprintf(shared_memory + OFFSET, MEM_SIZE - OFFSET, "[%s] %s\n", pseudo_memory, message);
+
+    if (bytes_written < 0) {
+        perror("Error writing to shared memory");
+        return;
+    }
+
+    OFFSET += bytes_written; // Increment OFFSET by actual bytes written
+
+
 }
+
+
+
 
 
 void send_messages(int socket_fd, const char* username, int isbot,sem_t* semaphore){
@@ -226,7 +232,7 @@ void send_messages(int socket_fd, const char* username, int isbot,sem_t* semapho
                     perror("Erreur lors de l'écriture dans le pipe");
                     cleanup(shared_memory,semaphore,socket_fd);
                     exit(EXIT_FAILURE);
-            } 
+            }
 
 
             if(!isbot ){
@@ -274,15 +280,15 @@ void* receive_messages(void* args){
          char* sender = strtok(received_message, " "); // split the sender's username with the message
          char* message = strtok(NULL, "");
 
-         if(is_bot && is_manual){        // mode  bot and manual 
+         if(is_bot && is_manual){        // mode  bot and manual
                sem_wait(print_semaphore);
                printf("\a");
                printf("[%s] %s\n",sender,message);
                fflush(stdout);
                sem_post(print_semaphore);
-                
+
             }
-            
+
             else if(is_bot && !is_manual){ // mode bot only
                 sem_wait(print_semaphore);
                 printf("[%s] %s\n",sender,message);
@@ -303,7 +309,7 @@ void* receive_messages(void* args){
                sem_post(print_semaphore);
                 store_in_memory(shared_memory,message, sender,print_semaphore);
             }
-            
+
       }
 
    }
@@ -314,7 +320,7 @@ void* receive_messages(void* args){
 
 
 int main(int argc, char* argv[]) {
-   //not enough or too many arguments 
+   //not enough or too many arguments
     if (argc < 2 && argc > 4) {
         fprintf(stderr, "chat pseudo_utilisateur [--bot] [--manuel]\n");
         return 1;
@@ -345,7 +351,7 @@ int main(int argc, char* argv[]) {
       }
    }
 
-   struct sigaction sa; 
+   struct sigaction sa;
    sa.sa_handler = sigint_handler;
    sa.sa_flags = 0;
    sigemptyset(&sa.sa_mask);
@@ -355,8 +361,8 @@ int main(int argc, char* argv[]) {
       perror("Erreur lors de l'initialisation du gestionnaire SIGINT");
       exit(EXIT_FAILURE);
    }
-   
-   int client_fd; //create socket 
+
+   int client_fd; //create socket
    client_fd = create_socket();
 
    // Connect client to server
@@ -382,12 +388,12 @@ int main(int argc, char* argv[]) {
    arguments.socket_fd = client_fd;
    arguments.is_bot_flag = is_bot;
    arguments.semaphore = print_semaphore;
-   pthread_create(&reading_thread,NULL,&receive_messages,(void*)&arguments);  
+   pthread_create(&reading_thread,NULL,&receive_messages,(void*)&arguments);
 
    send_messages(client_fd,username,is_bot,print_semaphore);
-   
 
-   pthread_join(reading_thread,NULL); // wait for the thread to terminate   
+
+   pthread_join(reading_thread,NULL); // wait for the thread to terminate
 
    return 0;
 }
