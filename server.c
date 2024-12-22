@@ -11,14 +11,6 @@
 #include <arpa/inet.h>
 #include <stdbool.h>
 #include <stdint.h>
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdio.h>
-
-#include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
 #include <pthread.h>
 #include <stdatomic.h>
 
@@ -118,7 +110,7 @@ void shutdown_server(){
  * @param client_sock Socket descriptor of the client.
  * @param tid Thread ID handling the client.
  *
- 
+ */
 void add_client(int client_sock, pthread_t tid) {
     pthread_mutex_lock(&clients_mutex);
     if (liste_client.client_count < MAX_CLIENTS) {
@@ -239,13 +231,13 @@ void *handle_client(void *client_sock) {
 
                 // Find the recipient in the list
                 int recipient_sock = -1;
-                char *name ;
+                
                 for (int i = 0; i < liste_client.client_count; i++) {
                     // Find the recipient's socket based on recipient's username
                     if (liste_client.client_usernames[i] != NULL &&
                         strcmp(liste_client.client_usernames[i], recipient) == 0) {
                         recipient_sock = liste_client.client_sockets[i];
-                        name = liste_client.client_usernames[i];
+                        
                         }
 
                     // Find the sender's username based on the socket
@@ -277,9 +269,8 @@ void *handle_client(void *client_sock) {
                     // Notify sender that the recipient was not found
                     char error_msg[64];
 
-                    snprintf(error_msg, sizeof(error_msg), "this person (%s) is not connected.\n", recipient);
-                    //const char *err_msg = "Recipient not found\n"; // remplacer par cette prsn pas co
-                    // envoie a l'utilisateur le msg d'erreur
+                    snprintf(error_msg, sizeof(error_msg), "Cette personne (%s) n'est pas connectée.\n", recipient);
+                    // envoie à l'utilisateur le msg d'erreur
                     ssize_t send_bytes = send(sock, error_msg, strlen(error_msg), 0);
                     if (send_bytes == -1) {
 
@@ -293,17 +284,16 @@ void *handle_client(void *client_sock) {
 
 
 
-        }else if (bytes_read == 0) { // Le client a fermé la connexion
-    // SIGINT DOIT DECO TLMD
+        }else if (bytes_read == 0) { // client disconnected
                 printf("Client disconnected: socket %d\n", sock);
                 close(sock);
                 pthread_mutex_lock(&clients_mutex);
                 for (int i = 0; i < liste_client.client_count; i++) {
                     if (liste_client.client_sockets[i] == sock) {
-                                    // Vérifiez avant de libérer le username
+                                    // verify before free username
                         if (liste_client.client_usernames[i] != NULL) {
                             free(liste_client.client_usernames[i]);
-                            liste_client.client_usernames[i] = NULL; // Évitez une double libération
+                            liste_client.client_usernames[i] = NULL; // no double iteration
                         }
 
                         liste_client.client_sockets[i] = liste_client.client_sockets[--liste_client.client_count];
@@ -313,7 +303,7 @@ void *handle_client(void *client_sock) {
                 }
                 pthread_mutex_unlock(&clients_mutex);
                 break;
-        }
+        } 
         else if (bytes_read < 0){
            
             perror("Error while reading\n");
@@ -362,7 +352,7 @@ void sock_creation(){
     // Opens a new connection
     pthread_mutex_unlock(&server_fd_mutex);
     while (!sigint_recu) {
-        int new_socket = checked(accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen));
+        int new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
 
         if (new_socket >= 0) {
             int *client_sock = (int*)malloc(sizeof(int));
@@ -389,7 +379,16 @@ void sock_creation(){
                 continue;
             }
 
-        } 
+        }
+        else if(new_socket < 0){
+            if(sigint_recu){  // if sigint shutdown serv
+                break;
+            }
+            else{
+                continue; // ignore and pass to the next client
+            }
+        }
+
     }
     shutdown_server();
 }
